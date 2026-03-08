@@ -12,6 +12,7 @@ const inventoryRoutes = require('./inventory');
 const buildingsRoutes = require('./buildings');
 const allocationRoutes = require('./allocations');
 const usersRoutes = require('./users');
+const slotSystemRoutes = require('./slotSystems');
 
 // Health check endpoint
 router.get('/health', (req, res) => {
@@ -40,5 +41,6 @@ router.use('/inventory', inventoryRoutes);
 router.use('/buildings', buildingsRoutes);
 router.use('/allocations', allocationRoutes);
 router.use('/users', usersRoutes);
+router.use('/slot-systems', slotSystemRoutes);
 
 module.exports = router;

@@ -511,6 +511,156 @@ const createTables = async () => {
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created 
         ON audit_logs(created_at);
     `);
+
+    // =============================================================
+    // SPRINT 2: SLOT SYSTEMS TABLE
+    // Multiple independent slot systems (BTech_1stYear, MTech, etc.)
+    // =============================================================
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS slot_systems (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(100) UNIQUE NOT NULL,
+        program_type VARCHAR(50) NOT NULL,
+        year_group VARCHAR(50),
+        description TEXT,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+    `);
+
+    // =============================================================
+    // SPRINT 2: SLOT ENTRIES TABLE
+    // Individual time slots within a slot system
+    // =============================================================
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS slot_entries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        slot_system_id UUID NOT NULL REFERENCES slot_systems(id) ON DELETE CASCADE,
+        slot_code VARCHAR(20) NOT NULL,
+        day VARCHAR(10) NOT NULL,
+        start_time TIME NOT NULL,
+        end_time TIME NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        CONSTRAINT valid_slot_times CHECK (end_time > start_time),
+        UNIQUE(slot_system_id, slot_code, day, start_time)
+      );
+    `);
+
+    // =============================================================
+    // SPRINT 2: ALTER COURSES TABLE
+    // Add slot_system_id foreign key
+    // =============================================================
+
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE courses
+        ADD COLUMN slot_system_id UUID REFERENCES slot_systems(id) ON DELETE SET NULL;
+      EXCEPTION
+        WHEN duplicate_column THEN null;
+      END $$;
+    `);
+    
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE courses
+        ADD COLUMN instructor VARCHAR(200);
+      EXCEPTION
+        WHEN duplicate_column THEN null;
+      END $$;
+    `);
+    
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE courses
+        ADD COLUMN student_count INTEGER DEFAULT 0;
+      EXCEPTION
+        WHEN duplicate_column THEN null;
+      END $$;
+    `);
+
+    // =============================================================
+    // SPRINT 2: TIMETABLE ENTRIES TABLE
+    // Parsed timetable rows with slot normalization
+    // =============================================================
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS timetable_entries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        subject_code VARCHAR(20) NOT NULL,
+        subject_name VARCHAR(200),
+        slot_code VARCHAR(20) NOT NULL,
+        slot_constraints JSONB DEFAULT '{}',
+        instructor VARCHAR(200),
+        student_count INTEGER DEFAULT 0,
+        classroom VARCHAR(100),
+        raw_input TEXT,
+        course_id UUID REFERENCES courses(id) ON DELETE SET NULL,
+        slot_system_id UUID NOT NULL REFERENCES slot_systems(id) ON DELETE CASCADE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+    `);
+
+    // =============================================================
+    // SPRINT 2: BOOKINGS TABLE
+    // Preallocated room bookings from timetable
+    // =============================================================
+
+    await client.query(`
+      DO $$ BEGIN
+        CREATE TYPE booking_type AS ENUM ('class', 'lab', 'tutorial', 'exam', 'other');
+      EXCEPTION
+        WHEN duplicate_object THEN null;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS bookings (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        room_id UUID NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+        slot_entry_id UUID REFERENCES slot_entries(id) ON DELETE SET NULL,
+        date DATE NOT NULL,
+        day VARCHAR(10) NOT NULL,
+        start_time TIME NOT NULL,
+        end_time TIME NOT NULL,
+        course_id UUID REFERENCES courses(id) ON DELETE SET NULL,
+        timetable_entry_id UUID REFERENCES timetable_entries(id) ON DELETE SET NULL,
+        booking_type booking_type NOT NULL DEFAULT 'class',
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        CONSTRAINT valid_booking_times CHECK (end_time > start_time)
+      );
+    `);
+
+    // =============================================================
+    // SPRINT 2: INDEXES
+    // =============================================================
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_slot_entries_system
+        ON slot_entries(slot_system_id);
+      CREATE INDEX IF NOT EXISTS idx_slot_entries_code
+        ON slot_entries(slot_system_id, slot_code);
+      CREATE INDEX IF NOT EXISTS idx_courses_slot_system
+        ON courses(slot_system_id);
+      CREATE INDEX IF NOT EXISTS idx_timetable_entries_slot_system
+        ON timetable_entries(slot_system_id);
+      CREATE INDEX IF NOT EXISTS idx_timetable_entries_course
+        ON timetable_entries(course_id);
+      CREATE INDEX IF NOT EXISTS idx_bookings_room_date
+        ON bookings(room_id, date);
+      CREATE INDEX IF NOT EXISTS idx_bookings_room_day_time
+        ON bookings(room_id, day, start_time, end_time);
+      CREATE INDEX IF NOT EXISTS idx_bookings_course
+        ON bookings(course_id);
+      CREATE INDEX IF NOT EXISTS idx_bookings_timetable_entry
+        ON bookings(timetable_entry_id);
+    `);
+    
     
     await client.query('COMMIT');
     logger.info('Database migration completed successfully');
