@@ -14,6 +14,7 @@ const allocationRoutes = require('./allocations');
 const usersRoutes = require('./users');
 const slotSystemRoutes = require('./slotSystems');
 const courseRoutes = require('./courses');
+const timetableRoutes = require('./timetables');
 
 // Health check endpoint
 router.get('/health', (req, res) => {
@@ -44,5 +45,6 @@ router.use('/allocations', allocationRoutes);
 router.use('/users', usersRoutes);
 router.use('/slot-systems', slotSystemRoutes);
 const courseRoutes = require('./courses');
+router.use('/timetables', timetableRoutes);
 
 module.exports = router;
