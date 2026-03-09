@@ -7,12 +7,22 @@ const express = require('express');
 const router = express.Router();
 const roomController = require('../controllers/roomController');
 const inventoryController = require('../controllers/inventoryController');
+const roomAvailabilityController = require('../controllers/roomAvailabilityController');
 const { authenticate } = require('../middleware/auth');
 const { isStaffOrAdmin, checkPermission } = require('../middleware/rbac');
 const { validate } = require('../middleware/validation');
 
 // All routes require authentication
 router.use(authenticate);
+
+// Slot-system-aware room availability (must be before /:id routes)
+router.get(
+  '/availability',
+  checkPermission('rooms', 'read'),
+  roomAvailabilityController.availabilityValidation,
+  validate,
+  roomAvailabilityController.getAvailability
+);
 
 // Find available rooms (must be before /:id routes)
 router.get(
