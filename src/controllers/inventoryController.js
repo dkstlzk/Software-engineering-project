@@ -1,11 +1,16 @@
-// inventory controller - handles room inventory management endpoints (staff can create/update/delete inventory items)
+/**
+ * Inventory Controller
+ * Handles room inventory management endpoints
+ * Staff can create/update/delete inventory items
+ */
+const { body, param, query } = require('express-validator');
+const inventoryService = require('../services/inventoryService');
+const { asyncHandler } = require('../utils/errorHandler');
 
-const { body, param, query }= require('express-validator');
-const inventoryService= require('../services/inventoryService');
-const { asyncHandler }= require('../utils/errorHandler');
-
-//validation rules for creating inventory item
-const createValidation= [
+/**
+ * Validation rules for creating inventory item
+ */
+const createValidation = [
   param('roomId').isUUID().withMessage('Valid room ID is required'),
   body('itemName')
     .trim()
@@ -51,7 +56,9 @@ const createValidation= [
     .withMessage('Invalid next maintenance date'),
 ];
 
-// validation rules for updating inventory item
+/**
+ * Validation rules for updating inventory item
+ */
 const updateValidation = [
   param('id').isUUID().withMessage('Valid item ID is required'),
   body('itemName')
@@ -90,7 +97,9 @@ const updateValidation = [
     .toDate(),
 ];
 
-// validation for listing items
+/**
+ * Validation for listing items
+ */
 const listValidation = [
   param('roomId').isUUID().withMessage('Valid room ID is required'),
   query('status')
@@ -102,8 +111,11 @@ const listValidation = [
     .isLength({ max: 100 }),
 ];
 
-// add item to room inventory - staff only
-// POST /api/rooms/:roomId/inventory
+/**
+ * Add item to room inventory
+ * POST /api/rooms/:roomId/inventory
+ * Staff only
+ */
 const addItem = asyncHandler(async (req, res) => {
   const item = await inventoryService.addItem(
     req.params.roomId,
@@ -118,10 +130,12 @@ const addItem = asyncHandler(async (req, res) => {
   });
 });
 
-// get room inventory  
-// GET /api/rooms/:roomId/inventory
-const getRoomInventory= asyncHandler(async (req, res)=>{
-  const items= await inventoryService.getByRoom(req.params.roomId, req.query);
+/**
+ * Get room inventory
+ * GET /api/rooms/:roomId/inventory
+ */
+const getRoomInventory = asyncHandler(async (req, res) => {
+  const items = await inventoryService.getByRoom(req.params.roomId, req.query);
 
   res.json({
     success: true,
@@ -129,11 +143,12 @@ const getRoomInventory= asyncHandler(async (req, res)=>{
   });
 });
 
-
-// get inventory item by ID
-// GET /api/inventory/:id
-const getById= asyncHandler(async (req, res)=>{
-  const item= await inventoryService.findById(req.params.id);
+/**
+ * Get inventory item by ID
+ * GET /api/inventory/:id
+ */
+const getById = asyncHandler(async (req, res) => {
+  const item = await inventoryService.findById(req.params.id);
 
   res.json({
     success: true,
@@ -141,10 +156,13 @@ const getById= asyncHandler(async (req, res)=>{
   });
 });
 
-//update inventory item details - staff only
-// PUT /api/inventory/:id
-const update= asyncHandler(async (req, res)=>{
-  const item= await inventoryService.update(
+/**
+ * Update inventory item
+ * PUT /api/inventory/:id
+ * Staff only
+ */
+const update = asyncHandler(async (req, res) => {
+  const item = await inventoryService.update(
     req.params.id,
     req.body,
     req.user.userId
@@ -157,9 +175,12 @@ const update= asyncHandler(async (req, res)=>{
   });
 });
 
-//delete inventory item - staff only
-// DELETE /api/inventory/:id
-const remove= asyncHandler(async (req, res)=>{
+/**
+ * Delete inventory item
+ * DELETE /api/inventory/:id
+ * Staff only
+ */
+const remove = asyncHandler(async (req, res) => {
   await inventoryService.delete(req.params.id, req.user.userId);
 
   res.json({
@@ -168,11 +189,14 @@ const remove= asyncHandler(async (req, res)=>{
   });
 });
 
-// update item status - staff only
-// PATCH /api/inventory/:id/status
-const updateStatus= asyncHandler(async (req, res)=>{
-  const { status }= req.body;
-  const item= await inventoryService.updateStatus(
+/**
+ * Update item status
+ * PATCH /api/inventory/:id/status
+ * Staff only
+ */
+const updateStatus = asyncHandler(async (req, res) => {
+  const { status } = req.body;
+  const item = await inventoryService.updateStatus(
     req.params.id,
     status,
     req.user.userId
@@ -185,11 +209,14 @@ const updateStatus= asyncHandler(async (req, res)=>{
   });
 });
 
-// get items needing maintenance - staff only
-// GET /api/inventory/maintenance-due?days=30
-const getMaintenanceDue= asyncHandler(async (req, res)=>{
-  const { days=30 }= req.query;
-  const items= await inventoryService.getMaintenanceDue(parseInt(days));
+/**
+ * Get items needing maintenance
+ * GET /api/inventory/maintenance-due
+ * Staff only
+ */
+const getMaintenanceDue = asyncHandler(async (req, res) => {
+  const { days = 30 } = req.query;
+  const items = await inventoryService.getMaintenanceDue(parseInt(days));
 
   res.json({
     success: true,
@@ -197,10 +224,12 @@ const getMaintenanceDue= asyncHandler(async (req, res)=>{
   });
 });
 
-// get room inventory summary - staff only
-// GET /api/rooms/:roomId/inventory/summary
-const getRoomSummary= asyncHandler(async (req, res)=>{
-  const summary= await inventoryService.getRoomSummary(req.params.roomId);
+/**
+ * Get room inventory summary
+ * GET /api/rooms/:roomId/inventory/summary
+ */
+const getRoomSummary = asyncHandler(async (req, res) => {
+  const summary = await inventoryService.getRoomSummary(req.params.roomId);
 
   res.json({
     success: true,
@@ -208,7 +237,7 @@ const getRoomSummary= asyncHandler(async (req, res)=>{
   });
 });
 
-module.exports={
+module.exports = {
   createValidation,
   updateValidation,
   listValidation,
