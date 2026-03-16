@@ -26,6 +26,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../../features/auth/AuthContext';
 import { getNavigationForRole } from '../../app/navigation';
 import { SIDEBAR_BG, SIDEBAR_TEXT } from '../../app/theme';
+import { NotificationPanel } from '../../features/notifications/NotificationPanel';
 
 const drawerWidth = 270;
 
@@ -204,6 +205,7 @@ export function AppLayout({ children }) {
             <Typography variant="subtitle1" sx={{ fontWeight: 700, flex: 1 }}>
               URAS
             </Typography>
+            <NotificationPanel />
             <Chip
               label={role?.toUpperCase()}
               size="small"
