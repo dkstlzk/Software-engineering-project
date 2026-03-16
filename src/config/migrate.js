@@ -661,7 +661,6 @@ const createTables = async () => {
         ON bookings(timetable_entry_id);
     `);
     
-    
     await client.query('COMMIT');
     logger.info('Database migration completed successfully');
     

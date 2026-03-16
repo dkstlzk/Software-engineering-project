@@ -1,29 +1,32 @@
-// allocation routes - for room booking policies and allocations
-// admin/staff for create/update/delete, read access for all authenticated users
-const express= require('express');
-const router= express.Router();
-const allocationController= require('../controllers/allocationController');
-const { authenticate }= require('../middleware/auth');
-const { isStaffOrAdmin, isAdmin, checkPermission }= require('../middleware/rbac');
-const { validate }= require('../middleware/validation');
+/**
+ * Allocation Routes
+ * Admin/Staff for create/update/delete
+ * Read access for all authenticated users
+ */
+const express = require('express');
+const router = express.Router();
+const allocationController = require('../controllers/allocationController');
+const { authenticate } = require('../middleware/auth');
+const { isStaffOrAdmin, isAdmin, checkPermission } = require('../middleware/rbac');
+const { validate } = require('../middleware/validation');
 
-// all routes require authentication
+// All routes require authentication
 router.use(authenticate);
 
-// get booking policies for current user
+// Get booking policies for current user
 router.get(
   '/policies',
   allocationController.getPolicies
 );
 
-// get all allocation policies (admin only)
+// Get all allocation policies (admin only)
 router.get(
   '/policies/all',
   isAdmin,
   allocationController.getAllPolicies
 );
 
-// update allocation policy for a role (admin only)
+// Update allocation policy for a role (admin only)
 router.put(
   '/policies/:roleName',
   isAdmin,
@@ -32,7 +35,7 @@ router.put(
   allocationController.updatePolicyByRole
 );
 
-// validate booking against policies
+// Validate booking against policies
 router.post(
   '/validate-policy',
   allocationController.policyValidation,
@@ -40,7 +43,7 @@ router.post(
   allocationController.validatePolicy
 );
 
-// get room's weekly schedule
+// Get room's weekly schedule
 router.get(
   '/room/:roomId/weekly',
   checkPermission('allocations', 'read'),
@@ -49,7 +52,7 @@ router.get(
   allocationController.getWeeklySchedule
 );
 
-// list allocations
+// List allocations
 router.get(
   '/',
   checkPermission('allocations', 'read'),
@@ -58,14 +61,14 @@ router.get(
   allocationController.getAll
 );
 
-// get allocation by ID
+// Get allocation by ID
 router.get(
   '/:id',
   checkPermission('allocations', 'read'),
   allocationController.getById
 );
 
-// create allocation - staff/admin only
+// Create allocation - staff/admin only
 router.post(
   '/',
   isStaffOrAdmin,
@@ -74,7 +77,7 @@ router.post(
   allocationController.create
 );
 
-// update allocation - staff/admin only
+// Update allocation - staff/admin only
 router.put(
   '/:id',
   isStaffOrAdmin,
@@ -83,11 +86,11 @@ router.put(
   allocationController.update
 );
 
-// delete allocation - staff/admin only
+// Delete allocation - staff/admin only
 router.delete(
   '/:id',
   isStaffOrAdmin,
   allocationController.remove
 );
 
-module.exports=router;
+module.exports = router;
