@@ -1,37 +1,59 @@
-# Dependencies
-node_modules/
-
-# Environment files
+# =========================
+# ENV (important)
+# =========================
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
+# =========================
+# Backend (Node + TS)
+# =========================
+backend/node_modules/
+backend/dist/
+backend/build/
+backend/*.log
+backend/*.tsbuildinfo
+
+# =========================
+# Frontend (React)
+# =========================
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/.next/
+
+# =========================
 # Logs
-logs/
+# =========================
 *.log
-npm-debug.log*
+logs/
 
+# =========================
 # OS files
+# =========================
 .DS_Store
 Thumbs.db
 
-# IDE files
-.idea/
+# =========================
+# IDE / Editor
+# =========================
 .vscode/
-*.swp
-*.swo
+.idea/
 
-# Build output
-dist/
-build/
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
 
-# Test coverage
+# =========================
+# Drizzle (safe ignore)
+# =========================
+backend/drizzle/*.db
+backend/drizzle/*.sqlite
+
+# =========================
+# Misc
+# =========================
 coverage/
-
-# Temporary files
-tmp/
-temp/
-
-# Frontend build
-frontend/dist/
-frontend/node_modules/
+.tmp/

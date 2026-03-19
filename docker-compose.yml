@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: ura_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ura_user
+      POSTGRES_PASSWORD: ura_pass
+      POSTGRES_DB: ura_system
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
