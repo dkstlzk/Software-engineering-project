@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "rooms_building_name_unique" ON "rooms" USING btree ("building_id",lower("name"));

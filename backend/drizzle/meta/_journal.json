@@ -8,6 +8,34 @@
       "when": 1773867057528,
       "tag": "0000_minor_silver_surfer",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1773952695855,
+      "tag": "0001_chunky_vengeance",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1773953777119,
+      "tag": "0002_familiar_dagger",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1773954037543,
+      "tag": "0003_chunky_lethal_legion",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1773954464288,
+      "tag": "0004_regular_silver_sable",
+      "breakpoints": true
     }
   ]
 }
