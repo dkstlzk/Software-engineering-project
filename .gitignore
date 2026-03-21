@@ -4,6 +4,7 @@
 .env
 .env.*
 !.env.example
+.env.local
 
 # =========================
 # Backend (Node + TS)
@@ -57,3 +58,4 @@ backend/drizzle/*.sqlite
 # =========================
 coverage/
 .tmp/
+node_modules/
