@@ -149,4 +149,52 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
+// PATCH /buildings/:id
+router.patch("/:id", async (req, res) => {
+  try {
+    const idParam = req.params.id;
+    const buildingId = Number(idParam);
+    const name = req.body?.name?.trim();
+
+    // Validate ID
+    if (Number.isNaN(buildingId)) {
+      return res.status(400).json({ error: "Invalid building id" });
+    }
+
+    // Validate name
+    if (!name) {
+      return res.status(400).json({ error: "Name is required" });
+    }
+
+    const result = await db
+      .update(buildings)
+      .set({ name })
+      .where(eq(buildings.id, buildingId))
+      .returning();
+
+    // Not found
+    if (result.length === 0) {
+      return res.status(404).json({ error: "Building not found" });
+    }
+
+    res.json({
+      message: "Building updated",
+      data: result[0],
+    });
+  } catch (error: any) {
+    console.error(error);
+
+    const pgError = error?.cause;
+
+    // Unique constraint
+    if (pgError?.code === "23505") {
+      return res.status(409).json({
+        error: "Building already exists",
+      });
+    }
+
+    res.status(500).json({ error: "Update failed" });
+  }
+});
+
 export default router;
