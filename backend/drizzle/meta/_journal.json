@@ -36,6 +36,34 @@
       "when": 1773954464288,
       "tag": "0004_regular_silver_sable",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1774191147384,
+      "tag": "0005_eager_the_liberteens",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1774222378889,
+      "tag": "0006_no-overlap",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1774223902158,
+      "tag": "0007_glorious_hairball",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1774224767675,
+      "tag": "0008_dear_rocket_raccoon",
+      "breakpoints": true
     }
   ]
 }
