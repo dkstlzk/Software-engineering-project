@@ -1,7 +1,7 @@
-import { Router } from "express";
+import { Router, Request, Response } from "express";
 import { db } from "../db";
-import { rooms , buildings } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { rooms , buildings ,bookings} from "../db/schema";
+import { and, asc, eq, gt, lt } from 'drizzle-orm';
 
 const router = Router();
 
@@ -74,6 +74,65 @@ router.get("/", async (req, res) => {
   }
 });
 
+router.get('/:id/availability', async (req: Request, res: Response): Promise<void> => {
+  const roomId = Number(req.params.id);
+  const startAtRaw = req.query.startAt;
+  const endAtRaw = req.query.endAt;
+
+  if (!Number.isInteger(roomId) || roomId <= 0) {
+    res.status(400).json({ message: 'Invalid roomId' });
+    return;
+  }
+
+  if (typeof startAtRaw !== 'string' || typeof endAtRaw !== 'string') {
+    res.status(400).json({ message: 'startAt and endAt are required' });
+    return;
+  }
+
+  const startAt = new Date(startAtRaw);
+  const endAt = new Date(endAtRaw);
+
+  if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime()) || startAt >= endAt) {
+    res.status(400).json({ message: 'Invalid startAt or endAt' });
+    return;
+  }
+
+  try {
+    const roomRows = await db
+      .select({
+        id: rooms.id,
+      })
+      .from(rooms)
+      .where(eq(rooms.id, roomId))
+      .limit(1);
+
+    if (roomRows.length === 0) {
+      res.status(404).json({ message: 'Room not found' });
+      return;
+    }
+
+    const overlappingBookings = await db
+      .select({
+        id: bookings.id,
+        startAt: bookings.startAt,
+        endAt: bookings.endAt,
+      })
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.roomId, roomId),
+          lt(bookings.startAt, endAt),
+          gt(bookings.endAt, startAt)
+        )
+      )
+      .orderBy(asc(bookings.startAt));
+
+    res.json(overlappingBookings);
+  } catch (error) {
+    console.error('GET /rooms/:id/availability error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 
 //POST room 
 router.post("/", async (req, res) => {
