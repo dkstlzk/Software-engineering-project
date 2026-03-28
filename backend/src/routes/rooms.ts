@@ -2,11 +2,13 @@ import { Router, Request, Response } from "express";
 import { db } from "../db";
 import { rooms , buildings ,bookings} from "../db/schema";
 import { and, asc, eq, gt, lt } from 'drizzle-orm';
+import { authMiddleware } from "../middleware/auth";
+import { requireRole } from "../middleware/rbac";
 
 const router = Router();
 
 // GET /rooms/:id
-router.get("/:id", async (req, res) => {
+router.get("/:id", authMiddleware, async (req, res) => {
   try {
     const idParam = req.params.id;
     const roomId = Number(idParam);
@@ -33,7 +35,7 @@ router.get("/:id", async (req, res) => {
 });
 
 //GET rooms with optional buildingId filter
-router.get("/", async (req, res) => {
+router.get("/", authMiddleware, async (req, res) => {
   try {
     const buildingId = req.query.buildingId;
 
@@ -74,7 +76,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.get('/:id/availability', async (req: Request, res: Response): Promise<void> => {
+router.get('/:id/availability', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   const roomId = Number(req.params.id);
   const startAtRaw = req.query.startAt;
   const endAtRaw = req.query.endAt;
@@ -135,7 +137,7 @@ router.get('/:id/availability', async (req: Request, res: Response): Promise<voi
 });
 
 //POST room 
-router.post("/", async (req, res) => {
+router.post("/", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
     const name = req.body?.name?.trim();
     const buildingIdRaw = req.body?.buildingId;
@@ -177,7 +179,7 @@ router.post("/", async (req, res) => {
 });
 
 // DELETE /rooms/:id
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
     const idParam = req.params.id;
     const roomId = Number(idParam);
@@ -204,7 +206,7 @@ router.delete("/:id", async (req, res) => {
 });
 
 // PATCH /rooms/:id
-router.patch("/:id", async (req, res) => {
+router.patch("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
     const idParam = req.params.id;
     const roomId = Number(idParam);

@@ -1,4 +1,16 @@
-const API_BASE_URL = "http://localhost:5000";
+const API_BASE_URL = "/api";
+const AUTH_TOKEN_KEY = "authToken";
+const AUTH_USER_KEY = "authUser";
+
+/* ===== Types ===== */
+
+export type UserRole = "ADMIN" | "STAFF" | "FACULTY" | "STUDENT";
+
+export type AuthUser = {
+  id: number;
+  name: string;
+  role: UserRole;
+};
 
 export type Building = {
   id: number;
@@ -11,10 +23,16 @@ export type Room = {
   buildingId: number;
 };
 
-export type BookingStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
+export type BookingStatus =
+  | "PENDING_FACULTY"
+  | "PENDING_STAFF"
+  | "APPROVED"
+  | "REJECTED"
+  | "CANCELLED";
 
 export type BookingRequest = {
   id: number;
+  userId: number | null;
   roomId: number;
   startAt: string;
   endAt: string;
@@ -23,8 +41,150 @@ export type BookingRequest = {
   createdAt: string;
 };
 
-type BuildingsListResponse = {
-  data: Building[];
+export type Booking = {
+  id: number;
+  roomId: number;
+  startAt: string;
+  endAt: string;
+  requestId: number | null;
+};
+
+export type BookingPruneScope = "all" | "slot-system";
+
+export type BookingPruneResult = {
+  scope: BookingPruneScope;
+  deletedBookings: number;
+  slotSystemId?: number;
+};
+
+export type AvailabilityRoom = {
+  id: number;
+  name: string;
+  isAvailable: boolean;
+};
+
+export type AvailabilityBuilding = {
+  buildingId: number;
+  buildingName: string;
+  rooms: AvailabilityRoom[];
+};
+
+export type DayOfWeek = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
+
+export type SlotSystem = {
+  id: number;
+  name: string;
+  createdAt: string;
+};
+
+export type SlotDay = {
+  id: number;
+  slotSystemId: number;
+  dayOfWeek: DayOfWeek;
+  orderIndex: number;
+  laneCount: number;
+};
+
+export type SlotTimeBand = {
+  id: number;
+  slotSystemId: number;
+  startTime: string;
+  endTime: string;
+  orderIndex: number;
+};
+
+export type SlotBlock = {
+  id: number;
+  slotSystemId: number;
+  dayId: number;
+  startBandId: number;
+  laneIndex: number;
+  rowSpan: number;
+  label: string;
+  createdAt: string;
+};
+
+export type SlotFullGrid = {
+  slotSystem: SlotSystem;
+  days: SlotDay[];
+  timeBands: SlotTimeBand[];
+  blocks: SlotBlock[];
+};
+
+export type TimetableImportRowStatus =
+  | "VALID_AND_AUTOMATABLE"
+  | "UNRESOLVED_SLOT"
+  | "UNRESOLVED_ROOM"
+  | "AMBIGUOUS_CLASSROOM"
+  | "DUPLICATE_ROW"
+  | "CONFLICTING_MAPPING"
+  | "MISSING_REQUIRED_FIELD"
+  | "OTHER_PROCESSING_ERROR";
+
+export type TimetableImportPreviewRow = {
+  rowId: number;
+  rowIndex: number;
+  courseCode: string;
+  slot: string;
+  classroom: string;
+  classification: TimetableImportRowStatus;
+  reasons: string[];
+  suggestions: string[];
+  parsedBuilding: string | null;
+  parsedRoom: string | null;
+  resolvedSlotLabel: string | null;
+  resolvedRoomId: number | null;
+};
+
+export type TimetableImportPreviewReport = {
+  batchId: number;
+  reused: boolean;
+  slotSystemId: number;
+  termStartDate: string;
+  termEndDate: string;
+  processedRows: number;
+  validRows: number;
+  unresolvedRows: number;
+  warnings: string[];
+  rows: TimetableImportPreviewRow[];
+};
+
+export type TimetableImportCommitDecision = {
+  rowId: number;
+  action: "AUTO" | "RESOLVE" | "SKIP";
+  resolvedSlotLabel?: string;
+  resolvedRoomId?: number;
+};
+
+export type TimetableImportCommitRowResult = {
+  rowId: number;
+  rowIndex: number;
+  classification: TimetableImportRowStatus;
+  action: "AUTO" | "RESOLVE" | "SKIP";
+  created: number;
+  failed: number;
+  skipped: number;
+  alreadyProcessed: number;
+  unresolved: number;
+  reasons: string[];
+};
+
+export type TimetableImportCommitReport = {
+  batchId: number;
+  status: "COMMITTED" | "ALREADY_COMMITTED";
+  processedRows: number;
+  autoCreatedBookings: number;
+  alreadyProcessedBookings: number;
+  failedOccurrences: number;
+  unresolvedRows: number;
+  skippedRows: number;
+  rowResults: TimetableImportCommitRowResult[];
+  warnings: string[];
+};
+
+type LoginResponse = {
+  token: string;
+  user: AuthUser;
 };
 
 type ApiErrorPayload = {
@@ -32,30 +192,151 @@ type ApiErrorPayload = {
   message?: string;
 };
 
+type BuildingsListResponse = {
+  data: Building[];
+};
+
+/* ===== Auth Helpers ===== */
+
+let onUnauthorizedCallback: (() => void) | null = null;
+
+export function setOnUnauthorized(cb: () => void) {
+  onUnauthorizedCallback = cb;
+}
+
+export function getAuthToken(): string | null {
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+export function getAuthUser(): AuthUser | null {
+  const raw = localStorage.getItem(AUTH_USER_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as AuthUser;
+  } catch {
+    return null;
+  }
+}
+
+export function clearAuth(): void {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_USER_KEY);
+}
+
+/* ===== Core Request ===== */
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAuthToken();
+
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
     ...init,
   });
+
+  // Handle 204 No Content
+  if (response.status === 204) {
+    return undefined as T;
+  }
 
   const contentType = response.headers.get("content-type") ?? "";
   const isJson = contentType.includes("application/json");
   const payload = isJson ? ((await response.json()) as unknown) : null;
 
   if (!response.ok) {
+    // Auto-logout on 401
+    if (response.status === 401) {
+      clearAuth();
+      if (onUnauthorizedCallback) {
+        onUnauthorizedCallback();
+      }
+    }
+
     const apiPayload = payload as ApiErrorPayload | null;
     const message =
       apiPayload?.error ??
       apiPayload?.message ??
-      `Request failed with status ${response.status}`;
+      httpErrorMessage(response.status);
     throw new Error(message);
   }
 
   return payload as T;
 }
+
+async function requestFormData<T>(
+  path: string,
+  formData: FormData,
+  init?: Omit<RequestInit, "body" | "headers"> & { headers?: HeadersInit }
+): Promise<T> {
+  const token = getAuthToken();
+
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    method: init?.method ?? "POST",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
+    body: formData,
+  });
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const isJson = contentType.includes("application/json");
+  const payload = isJson ? ((await response.json()) as unknown) : null;
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      clearAuth();
+      if (onUnauthorizedCallback) {
+        onUnauthorizedCallback();
+      }
+    }
+
+    const apiPayload = payload as ApiErrorPayload | null;
+    const message =
+      apiPayload?.error ??
+      apiPayload?.message ??
+      httpErrorMessage(response.status);
+
+    throw new Error(message);
+  }
+
+  return payload as T;
+}
+
+function httpErrorMessage(status: number): string {
+  switch (status) {
+    case 400: return "Invalid request";
+    case 401: return "Session expired. Please log in again.";
+    case 403: return "You don't have permission to perform this action";
+    case 404: return "Resource not found";
+    case 409: return "Conflict with existing data";
+    default:  return `Request failed (${status})`;
+  }
+}
+
+/* ===== Auth ===== */
+
+export async function login(email: string, password: string): Promise<AuthUser> {
+  const response = await request<LoginResponse>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+
+  localStorage.setItem(AUTH_TOKEN_KEY, response.token);
+  localStorage.setItem(AUTH_USER_KEY, JSON.stringify(response.user));
+
+  return response.user;
+}
+
+/* ===== Buildings ===== */
 
 export async function getBuildings(): Promise<Building[]> {
   const response = await request<BuildingsListResponse>("/buildings");
@@ -67,7 +348,6 @@ export async function createBuilding(name: string): Promise<Building> {
     method: "POST",
     body: JSON.stringify({ name }),
   });
-
   return response.data;
 }
 
@@ -76,7 +356,6 @@ export async function updateBuilding(id: number, name: string): Promise<Building
     method: "PATCH",
     body: JSON.stringify({ name }),
   });
-
   return response.data;
 }
 
@@ -85,6 +364,8 @@ export async function deleteBuilding(id: number): Promise<void> {
     method: "DELETE",
   });
 }
+
+/* ===== Rooms ===== */
 
 export async function getRooms(buildingId?: number): Promise<Room[]> {
   const query =
@@ -104,7 +385,6 @@ export async function updateRoom(id: number, name: string): Promise<Room> {
     method: "PATCH",
     body: JSON.stringify({ name }),
   });
-
   return response.data;
 }
 
@@ -113,6 +393,17 @@ export async function deleteRoom(id: number): Promise<void> {
     method: "DELETE",
   });
 }
+
+export async function getRoomAvailability(
+  roomId: number,
+  startAt: string,
+  endAt: string
+): Promise<{ id: number; startAt: string; endAt: string }[]> {
+  const params = new URLSearchParams({ startAt, endAt });
+  return request(`/rooms/${roomId}/availability?${params.toString()}`);
+}
+
+/* ===== Booking Requests ===== */
 
 export async function getBookingRequests(status?: BookingStatus): Promise<BookingRequest[]> {
   const query = status ? `?status=${encodeURIComponent(status)}` : "";
@@ -137,8 +428,231 @@ export async function approveBookingRequest(id: number): Promise<void> {
   });
 }
 
+export async function forwardBookingRequest(id: number): Promise<void> {
+  await request<unknown>(`/booking-requests/${id}/forward`, {
+    method: "POST",
+  });
+}
+
 export async function rejectBookingRequest(id: number): Promise<void> {
   await request<unknown>(`/booking-requests/${id}/reject`, {
     method: "POST",
+  });
+}
+
+export async function cancelBookingRequest(id: number): Promise<void> {
+  await request<unknown>(`/booking-requests/${id}/cancel`, {
+    method: "POST",
+  });
+}
+
+/* ===== Bookings ===== */
+
+export async function getBookings(filters?: {
+  roomId?: number;
+  buildingId?: number;
+  startAt?: string;
+  endAt?: string;
+}): Promise<Booking[]> {
+  const params = new URLSearchParams();
+  if (filters?.roomId !== undefined) params.set("roomId", String(filters.roomId));
+  if (filters?.buildingId !== undefined) params.set("buildingId", String(filters.buildingId));
+  if (filters?.startAt) params.set("startAt", filters.startAt);
+  if (filters?.endAt) params.set("endAt", filters.endAt);
+  const qs = params.toString();
+  return request<Booking[]>(`/bookings${qs ? `?${qs}` : ""}`);
+}
+
+export async function createBooking(input: {
+  roomId: number;
+  startAt: string;
+  endAt: string;
+}): Promise<Booking> {
+  return request<Booking>("/bookings", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteBooking(id: number): Promise<void> {
+  await request<void>(`/bookings/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function pruneAllBookings(): Promise<BookingPruneResult> {
+  return request<BookingPruneResult>("/bookings/prune?scope=all", {
+    method: "DELETE",
+  });
+}
+
+export async function pruneBookingsBySlotSystem(slotSystemId: number): Promise<BookingPruneResult> {
+  if (!Number.isInteger(slotSystemId) || slotSystemId <= 0) {
+    throw new Error("Invalid slotSystemId");
+  }
+
+  const params = new URLSearchParams({
+    scope: "slot-system",
+    slotSystemId: String(slotSystemId),
+  });
+
+  return request<BookingPruneResult>(`/bookings/prune?${params.toString()}`, {
+    method: "DELETE",
+  });
+}
+
+/* ===== Availability ===== */
+
+export async function getAvailability(
+  startAt: string,
+  endAt: string,
+  buildingId?: number
+): Promise<AvailabilityBuilding[]> {
+  const params = new URLSearchParams({ startAt, endAt });
+  if (buildingId !== undefined) params.set("buildingId", String(buildingId));
+  return request<AvailabilityBuilding[]>(`/availability?${params.toString()}`);
+}
+
+/* ===== Timetable ===== */
+
+export async function getSlotSystems(): Promise<SlotSystem[]> {
+  return request<SlotSystem[]>("/timetable/slot-systems");
+}
+
+export async function createSlotSystem(name: string): Promise<SlotSystem> {
+  return request<SlotSystem>("/timetable/slot-systems", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteSlotSystem(slotSystemId: number): Promise<void> {
+  await request<void>(`/timetable/slot-systems/${slotSystemId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getDays(slotSystemId: number): Promise<SlotDay[]> {
+  const params = new URLSearchParams({ slotSystemId: String(slotSystemId) });
+  return request<SlotDay[]>(`/timetable/days?${params.toString()}`);
+}
+
+export async function createDay(input: {
+  slotSystemId: number;
+  dayOfWeek: DayOfWeek;
+  orderIndex?: number;
+}): Promise<SlotDay> {
+  return request<SlotDay>("/timetable/days", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteDay(dayId: number): Promise<void> {
+  await request<void>(`/timetable/days/${dayId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function addDayLane(dayId: number): Promise<SlotDay> {
+  return request<SlotDay>(`/timetable/days/${dayId}/lanes`, {
+    method: "POST",
+  });
+}
+
+export async function removeDayLane(dayId: number): Promise<SlotDay> {
+  return request<SlotDay>(`/timetable/days/${dayId}/lanes`, {
+    method: "DELETE",
+  });
+}
+
+export async function getTimeBands(slotSystemId: number): Promise<SlotTimeBand[]> {
+  const params = new URLSearchParams({ slotSystemId: String(slotSystemId) });
+  return request<SlotTimeBand[]>(`/timetable/time-bands?${params.toString()}`);
+}
+
+export async function createTimeBand(input: {
+  slotSystemId: number;
+  startTime: string;
+  endTime: string;
+  orderIndex?: number;
+}): Promise<SlotTimeBand> {
+  return request<SlotTimeBand>("/timetable/time-bands", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateTimeBand(
+  timeBandId: number,
+  input: {
+    startTime?: string;
+    endTime?: string;
+    orderIndex?: number;
+  }
+): Promise<SlotTimeBand> {
+  return request<SlotTimeBand>(`/timetable/time-bands/${timeBandId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteTimeBand(timeBandId: number): Promise<void> {
+  await request<void>(`/timetable/time-bands/${timeBandId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getFullGrid(slotSystemId: number): Promise<SlotFullGrid> {
+  return request<SlotFullGrid>(`/timetable/slot-systems/${slotSystemId}/full`);
+}
+
+export async function createBlock(input: {
+  slotSystemId: number;
+  dayId: number;
+  startBandId: number;
+  laneIndex: number;
+  rowSpan: number;
+  label: string;
+}): Promise<SlotBlock> {
+  return request<SlotBlock>("/timetable/blocks", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteBlock(blockId: number): Promise<void> {
+  await request<void>(`/timetable/blocks/${blockId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function previewTimetableImport(input: {
+  slotSystemId: number;
+  termStartDate: string;
+  termEndDate: string;
+  file: File;
+  aliasMap?: Record<string, string>;
+}): Promise<TimetableImportPreviewReport> {
+  const formData = new FormData();
+  formData.append("slotSystemId", String(input.slotSystemId));
+  formData.append("termStartDate", input.termStartDate);
+  formData.append("termEndDate", input.termEndDate);
+  formData.append("file", input.file);
+
+  if (input.aliasMap && Object.keys(input.aliasMap).length > 0) {
+    formData.append("aliasMap", JSON.stringify(input.aliasMap));
+  }
+
+  return requestFormData<TimetableImportPreviewReport>("/timetable/imports/preview", formData);
+}
+
+export async function commitTimetableImport(
+  batchId: number,
+  decisions: TimetableImportCommitDecision[]
+): Promise<TimetableImportCommitReport> {
+  return request<TimetableImportCommitReport>(`/timetable/imports/${batchId}/commit`, {
+    method: "POST",
+    body: JSON.stringify({ decisions }),
   });
 }

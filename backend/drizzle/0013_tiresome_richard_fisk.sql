@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "unique_day_order_per_system" ON "slot_days" USING btree ("slot_system_id","order_index");

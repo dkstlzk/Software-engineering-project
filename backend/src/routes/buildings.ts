@@ -2,12 +2,14 @@ import { Router } from "express";
 import { db } from "../db";
 import { buildings ,rooms} from "../db/schema";
 import { eq } from "drizzle-orm";
+import { authMiddleware } from "../middleware/auth";
+import { requireRole } from "../middleware/rbac";
 
 const router = Router();
 
 
 // GET /buildings/:id/rooms
-router.get("/:id/rooms", async (req, res) => {
+router.get("/:id/rooms", authMiddleware, async (req, res) => {
   try {
     const idParam = req.params.id;
     const buildingId = Number(idParam);
@@ -41,7 +43,7 @@ router.get("/:id/rooms", async (req, res) => {
 });
 
 // GET /buildings/:id
-router.get("/:id", async (req, res) => {
+router.get("/:id", authMiddleware, async (req, res) => {
   try {
     const idParam = req.params.id;
     const buildingId = Number(idParam);
@@ -68,7 +70,7 @@ router.get("/:id", async (req, res) => {
 });
 
 // GET all buildings
-router.get("/", async (req, res) => {
+router.get("/", authMiddleware, async (req, res) => {
   try {
     const result = await db.select().from(buildings);
     res.json({ data: result });
@@ -79,7 +81,7 @@ router.get("/", async (req, res) => {
 });
 
 // POST create building
-router.post("/", async (req, res) => {
+router.post("/", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
     const name = req.body?.name?.trim();
 
@@ -112,7 +114,7 @@ router.post("/", async (req, res) => {
 });
 
 // DELETE /buildings/:id
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
     const idParam = req.params.id;
     const buildingId = Number(idParam);
@@ -150,7 +152,7 @@ router.delete("/:id", async (req, res) => {
 });
 
 // PATCH /buildings/:id
-router.patch("/:id", async (req, res) => {
+router.patch("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
     const idParam = req.params.id;
     const buildingId = Number(idParam);

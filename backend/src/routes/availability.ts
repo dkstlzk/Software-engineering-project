@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { and, asc, eq, gt, lt, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { buildings, rooms, bookings } from '../db/schema';
+import { authMiddleware } from "../middleware/auth";
 
 const router = Router();
 
@@ -31,7 +32,7 @@ function parseOptionalInt(value: unknown): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-router.get('/', async (req: Request, res: Response): Promise<void> => {
+router.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   const startAt = parseDate(req.query.startAt);
   const endAt = parseDate(req.query.endAt);
   const buildingId = parseOptionalInt(req.query.buildingId);
