@@ -5,6 +5,12 @@ import {
 	handleCreateBlock,
 	handleCreateDay,
 	handlePreviewImport,
+	handleListImportBatches,
+	handleGetImportBatch,
+	handleSaveImportDecisions,
+	handleReallocateImport,
+	handleDeleteImportBatch,
+	handleGetProcessedImportRows,
 	handleCommitImport,
 	handleCreateSlotSystem,
 	handleCreateTimeBand,
@@ -52,7 +58,13 @@ router.delete("/time-bands/:id", handleDeleteTimeBand);
 router.post("/blocks", handleCreateBlock);
 router.delete("/blocks/:id", handleDeleteBlock);
 
+router.get("/imports", handleListImportBatches);
 router.post("/imports/preview", upload.single("file"), handlePreviewImport);
+router.get("/imports/:id", handleGetImportBatch);
+router.put("/imports/:id/decisions", handleSaveImportDecisions);
+router.post("/imports/:id/reallocate", handleReallocateImport);
 router.post("/imports/:id/commit", handleCommitImport);
+router.delete("/imports/:id", handleDeleteImportBatch);
+router.get("/imports/:id/processed-rows", handleGetProcessedImportRows);
 
 export default router;

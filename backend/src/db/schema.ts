@@ -41,6 +41,12 @@ export const rooms = pgTable(
   })
 );
 
+export const bookingSourceEnum = pgEnum("booking_source", [
+  "MANUAL",
+  "BOOKING_REQUEST",
+  "TIMETABLE_IMPORT",
+]);
+
 export const bookings = pgTable("bookings", {
   id: serial("id").primaryKey(),
 
@@ -55,6 +61,10 @@ export const bookings = pgTable("bookings", {
   requestId: integer("request_id").references(() => bookingRequests.id, {
     onDelete: "set null",
   }),
+
+  source: bookingSourceEnum("source").notNull().default("MANUAL"),
+
+  sourceRef: text("source_ref"),
 });
 
 export const timetableImportBatchStatusEnum = pgEnum(
@@ -84,6 +94,24 @@ export const timetableImportOccurrenceStatusEnum = pgEnum(
     "ALREADY_PROCESSED",
   ],
 );
+
+export const timetableImportDecisionActionEnum = pgEnum(
+  "timetable_import_decision_action",
+  ["AUTO", "RESOLVE", "SKIP"],
+);
+
+export type TimetableImportCreateSlotPayload = {
+  dayId: number;
+  startBandId: number;
+  endBandId: number;
+  laneIndex?: number;
+  label?: string;
+};
+
+export type TimetableImportCreateRoomPayload = {
+  buildingName: string;
+  roomName: string;
+};
 
 export const timetableImportBatches = pgTable(
   "timetable_import_batches",
@@ -234,6 +262,57 @@ export const timetableImportOccurrences = pgTable(
     dedupeKeyUnique: uniqueIndex(
       "timetable_import_occurrences_dedupe_key_unique",
     ).on(table.dedupeKey),
+  }),
+);
+
+export const timetableImportRowResolutions = pgTable(
+  "timetable_import_row_resolutions",
+  {
+    id: serial("id").primaryKey(),
+
+    batchId: integer("batch_id")
+      .notNull()
+      .references(() => timetableImportBatches.id, { onDelete: "cascade" }),
+
+    rowId: integer("row_id")
+      .notNull()
+      .references(() => timetableImportRows.id, { onDelete: "cascade" }),
+
+    action: timetableImportDecisionActionEnum("action").notNull(),
+
+    resolvedSlotLabel: text("resolved_slot_label"),
+
+    resolvedRoomId: integer("resolved_room_id").references(() => rooms.id, {
+      onDelete: "set null",
+    }),
+
+    createSlot: jsonb("create_slot").$type<TimetableImportCreateSlotPayload | null>(),
+
+    createRoom: jsonb("create_room").$type<TimetableImportCreateRoomPayload | null>(),
+
+    createdCount: integer("created_count").notNull().default(0),
+    failedCount: integer("failed_count").notNull().default(0),
+    skippedCount: integer("skipped_count").notNull().default(0),
+    alreadyProcessedCount: integer("already_processed_count").notNull().default(0),
+    unresolvedCount: integer("unresolved_count").notNull().default(0),
+
+    reasons: jsonb("reasons")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+
+    createdAt: timestamp("created_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    batchRowUnique: uniqueIndex(
+      "timetable_import_row_resolutions_batch_row_unique",
+    ).on(table.batchId, table.rowId),
   }),
 );
 

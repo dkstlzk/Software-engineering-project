@@ -2,7 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
   addDayLane as apiAddDayLane,
+  createBooking as apiCreateBooking,
   commitTimetableImport as apiCommitTimetableImport,
+  deleteTimetableImportBatch as apiDeleteTimetableImportBatch,
+  getTimetableImportBatch as apiGetTimetableImportBatch,
+  getTimetableImportBatches as apiGetTimetableImportBatches,
+  deleteBooking as apiDeleteBooking,
   getBuildings,
   createBlock as apiCreateBlock,
   createDay as apiCreateDay,
@@ -15,10 +20,14 @@ import {
   getFullGrid,
   pruneAllBookings as apiPruneAllBookings,
   pruneBookingsBySlotSystem as apiPruneBookingsBySlotSystem,
+  reallocateTimetableImport as apiReallocateTimetableImport,
   removeDayLane as apiRemoveDayLane,
   getRooms,
   getSlotSystems,
+  getTimetableImportProcessedRows as apiGetTimetableImportProcessedRows,
   previewTimetableImport as apiPreviewTimetableImport,
+  saveTimetableImportDecisions as apiSaveTimetableImportDecisions,
+  updateBooking as apiUpdateBooking,
   updateTimeBand as apiUpdateTimeBand,
 } from "../api/api";
 import type {
@@ -30,9 +39,13 @@ import type {
   SlotFullGrid,
   SlotSystem,
   SlotTimeBand,
+  TimetableImportBatchSummary,
   TimetableImportCommitDecision,
   TimetableImportCommitReport,
+  TimetableImportProcessedRowsReport,
+  TimetableImportPreviewRow,
   TimetableImportPreviewReport,
+  TimetableImportSavedDecision,
 } from "../api/api";
 import { formatDateDDMMYYYY } from "../utils/datetime";
 import { DateInput } from "../components/DateInput";
@@ -64,11 +77,129 @@ type DragSelection = {
   endBandIndex: number;
 };
 
+type SlotResolutionMode = "SELECT_EXISTING" | "CREATE_SLOT";
+type RoomResolutionMode = "SELECT_EXISTING" | "CREATE_ROOM";
+
+type ProcessedBookingEditState = {
+  roomId: number | "";
+  startAt: string;
+  endAt: string;
+};
+
 type RowDecisionState = {
   action: "AUTO" | "RESOLVE" | "SKIP";
+  slotResolutionMode: SlotResolutionMode;
+  roomResolutionMode: RoomResolutionMode;
   resolvedSlotLabel: string;
   resolvedRoomId: number | "";
+  createSlotLabel: string;
+  createSlotDayId: number | "";
+  createSlotStartBandId: number | "";
+  createSlotEndBandId: number | "";
+  createSlotLaneIndex: number;
+  createRoomBuildingName: string;
+  createRoomName: string;
 };
+
+function createEmptyDecisionState(): RowDecisionState {
+  return {
+    action: "SKIP",
+    slotResolutionMode: "SELECT_EXISTING",
+    roomResolutionMode: "SELECT_EXISTING",
+    resolvedSlotLabel: "",
+    resolvedRoomId: "",
+    createSlotLabel: "",
+    createSlotDayId: "",
+    createSlotStartBandId: "",
+    createSlotEndBandId: "",
+    createSlotLaneIndex: 0,
+    createRoomBuildingName: "",
+    createRoomName: "",
+  };
+}
+
+function createDecisionForPreviewRow(row: TimetableImportPreviewRow): RowDecisionState {
+  const slotResolutionMode: SlotResolutionMode =
+    row.classification === "UNRESOLVED_SLOT" ? "CREATE_SLOT" : "SELECT_EXISTING";
+
+  const roomResolutionMode: RoomResolutionMode =
+    row.classification === "UNRESOLVED_ROOM" || row.classification === "AMBIGUOUS_CLASSROOM"
+      ? "CREATE_ROOM"
+      : "SELECT_EXISTING";
+
+  return {
+    action: row.classification === "VALID_AND_AUTOMATABLE" ? "AUTO" : "SKIP",
+    slotResolutionMode,
+    roomResolutionMode,
+    resolvedSlotLabel: row.resolvedSlotLabel ?? row.slot,
+    resolvedRoomId: row.resolvedRoomId ?? "",
+    createSlotLabel: row.slot,
+    createSlotDayId: "",
+    createSlotStartBandId: "",
+    createSlotEndBandId: "",
+    createSlotLaneIndex: 0,
+    createRoomBuildingName: row.parsedBuilding ?? "",
+    createRoomName: row.parsedRoom ?? "",
+  };
+}
+
+function applySavedDecisionToRow(
+  row: TimetableImportPreviewRow,
+  savedDecision: TimetableImportSavedDecision,
+): RowDecisionState {
+  const next = createDecisionForPreviewRow(row);
+
+  next.action = savedDecision.action;
+
+  if (savedDecision.resolvedSlotLabel) {
+    next.resolvedSlotLabel = savedDecision.resolvedSlotLabel;
+  }
+
+  if (savedDecision.resolvedRoomId) {
+    next.resolvedRoomId = savedDecision.resolvedRoomId;
+  }
+
+  if (savedDecision.createSlot) {
+    next.slotResolutionMode = "CREATE_SLOT";
+    next.createSlotDayId = savedDecision.createSlot.dayId;
+    next.createSlotStartBandId = savedDecision.createSlot.startBandId;
+    next.createSlotEndBandId = savedDecision.createSlot.endBandId;
+    next.createSlotLaneIndex = savedDecision.createSlot.laneIndex ?? 0;
+    next.createSlotLabel = savedDecision.createSlot.label ?? next.createSlotLabel;
+  } else if (savedDecision.resolvedSlotLabel) {
+    next.slotResolutionMode = "SELECT_EXISTING";
+  }
+
+  if (savedDecision.createRoom) {
+    next.roomResolutionMode = "CREATE_ROOM";
+    next.createRoomBuildingName = savedDecision.createRoom.buildingName;
+    next.createRoomName = savedDecision.createRoom.roomName;
+  } else if (savedDecision.resolvedRoomId) {
+    next.roomResolutionMode = "SELECT_EXISTING";
+  }
+
+  return next;
+}
+
+function buildRowDecisionsFromReport(
+  report: TimetableImportPreviewReport,
+): Record<number, RowDecisionState> {
+  const savedByRowId = new Map<number, TimetableImportSavedDecision>(
+    report.savedDecisions.map((decision) => [decision.rowId, decision]),
+  );
+
+  const decisions: Record<number, RowDecisionState> = {};
+
+  for (const row of report.rows) {
+    const savedDecision = savedByRowId.get(row.rowId);
+
+    decisions[row.rowId] = savedDecision
+      ? applySavedDecisionToRow(row, savedDecision)
+      : createDecisionForPreviewRow(row);
+  }
+
+  return decisions;
+}
 
 function toCellKey(dayId: number, laneIndex: number, bandIndex: number): string {
   return `${dayId}:${laneIndex}:${bandIndex}`;
@@ -105,6 +236,36 @@ function parseAliasMap(raw: string): Record<string, string> {
   return output;
 }
 
+function toDateInputValue(value: string): string {
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  const hours = String(parsed.getHours()).padStart(2, "0");
+  const minutes = String(parsed.getMinutes()).padStart(2, "0");
+
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function toDateOnlyInputValue(value: string): string {
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 export function TimetableBuilderPage() {
   const [slotSystems, setSlotSystems] = useState<SlotSystem[]>([]);
   const [selectedSystemId, setSelectedSystemId] = useState<number | "">("");
@@ -136,10 +297,30 @@ export function TimetableBuilderPage() {
 
   const [importLoading, setImportLoading] = useState(false);
   const [commitLoading, setCommitLoading] = useState(false);
+  const [saveDecisionsLoading, setSaveDecisionsLoading] = useState(false);
+  const [reallocateLoading, setReallocateLoading] = useState(false);
+  const [deleteBatchLoading, setDeleteBatchLoading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importInfo, setImportInfo] = useState<string | null>(null);
+
+  const [importBatches, setImportBatches] = useState<TimetableImportBatchSummary[]>([]);
+  const [importBatchesLoading, setImportBatchesLoading] = useState(false);
+  const [importBatchesError, setImportBatchesError] = useState<string | null>(null);
+  const [selectedBatchId, setSelectedBatchId] = useState<number | "">("");
 
   const [previewReport, setPreviewReport] = useState<TimetableImportPreviewReport | null>(null);
   const [commitReport, setCommitReport] = useState<TimetableImportCommitReport | null>(null);
+  const [processedRowsReport, setProcessedRowsReport] =
+    useState<TimetableImportProcessedRowsReport | null>(null);
+  const [processedRowsLoading, setProcessedRowsLoading] = useState(false);
+  const [processedRowsError, setProcessedRowsError] = useState<string | null>(null);
+  const [processedBookingEdits, setProcessedBookingEdits] =
+    useState<Record<number, ProcessedBookingEditState>>({});
+  const [newRowBookingDrafts, setNewRowBookingDrafts] =
+    useState<Record<number, ProcessedBookingEditState>>({});
+  const [savingBookingId, setSavingBookingId] = useState<number | null>(null);
+  const [deletingBookingId, setDeletingBookingId] = useState<number | null>(null);
+  const [creatingRowId, setCreatingRowId] = useState<number | null>(null);
   const [rowDecisions, setRowDecisions] = useState<Record<number, RowDecisionState>>({});
 
   const [dragSelection, setDragSelection] = useState<DragSelection | null>(null);
@@ -147,6 +328,26 @@ export function TimetableBuilderPage() {
   const days: SlotDay[] = grid?.days ?? [];
   const timeBands: SlotTimeBand[] = grid?.timeBands ?? [];
   const blocks: SlotBlock[] = grid?.blocks ?? [];
+
+  const isImportBatchCommitted = previewReport?.status === "COMMITTED";
+  const isDecisionEditingLocked =
+    commitLoading ||
+    importLoading ||
+    saveDecisionsLoading ||
+    reallocateLoading ||
+    deleteBatchLoading;
+
+  const slotLabelOptions = useMemo(() => {
+    const labels = Array.from(
+      new Set(
+        blocks
+          .map((block) => block.label.trim())
+          .filter((label) => label.length > 0),
+      ),
+    );
+
+    return labels.sort((a, b) => a.localeCompare(b));
+  }, [blocks]);
 
   const buildingNameById = useMemo(() => {
     return new Map(buildings.map((building) => [building.id, building.name]));
@@ -360,6 +561,227 @@ export function TimetableBuilderPage() {
     }
   };
 
+  const loadImportBatches = async (slotSystemId: number | "") => {
+    if (slotSystemId === "") {
+      setImportBatches([]);
+      setImportBatchesError(null);
+      setSelectedBatchId("");
+      return;
+    }
+
+    setImportBatchesLoading(true);
+    setImportBatchesError(null);
+
+    try {
+      const batches = await apiGetTimetableImportBatches({
+        slotSystemId,
+        limit: 50,
+      });
+
+      setImportBatches(batches);
+
+      setSelectedBatchId((current) => {
+        if (current !== "" && batches.some((batch) => batch.batchId === current)) {
+          return current;
+        }
+
+        if (previewReport && batches.some((batch) => batch.batchId === previewReport.batchId)) {
+          return previewReport.batchId;
+        }
+
+        return "";
+      });
+    } catch (e) {
+      setImportBatches([]);
+      setImportBatchesError(e instanceof Error ? e.message : "Failed to load import batches");
+    } finally {
+      setImportBatchesLoading(false);
+    }
+  };
+
+  const hydratePreviewFromBatch = (report: TimetableImportPreviewReport) => {
+    setPreviewReport(report);
+    setRowDecisions(buildRowDecisionsFromReport(report));
+    setImportTermStart(toDateOnlyInputValue(report.termStartDate));
+    setImportTermEnd(toDateOnlyInputValue(report.termEndDate));
+    setSelectedBatchId(report.batchId);
+  };
+
+  const hydrateProcessedBookingState = (report: TimetableImportProcessedRowsReport) => {
+    const nextEdits: Record<number, ProcessedBookingEditState> = {};
+    const nextDrafts: Record<number, ProcessedBookingEditState> = {};
+
+    for (const row of report.rows) {
+      let draftRoomId: number | "" = row.resolvedRoomId ?? "";
+      let draftStartAt = "";
+      let draftEndAt = "";
+
+      for (const occurrence of row.occurrences) {
+        const sourceStart = occurrence.booking?.startAt ?? occurrence.startAt;
+        const sourceEnd = occurrence.booking?.endAt ?? occurrence.endAt;
+
+        if (!draftStartAt) {
+          draftStartAt = toDateInputValue(sourceStart);
+        }
+
+        if (!draftEndAt) {
+          draftEndAt = toDateInputValue(sourceEnd);
+        }
+
+        if (occurrence.booking) {
+          draftRoomId = occurrence.booking.roomId;
+
+          nextEdits[occurrence.booking.id] = {
+            roomId: occurrence.booking.roomId,
+            startAt: toDateInputValue(occurrence.booking.startAt),
+            endAt: toDateInputValue(occurrence.booking.endAt),
+          };
+        } else if (draftRoomId === "") {
+          draftRoomId = occurrence.roomId;
+        }
+      }
+
+      nextDrafts[row.rowId] = {
+        roomId: draftRoomId,
+        startAt: draftStartAt,
+        endAt: draftEndAt,
+      };
+    }
+
+    setProcessedBookingEdits(nextEdits);
+    setNewRowBookingDrafts(nextDrafts);
+  };
+
+  const loadProcessedRows = async (batchId: number) => {
+    setProcessedRowsLoading(true);
+    setProcessedRowsError(null);
+
+    try {
+      const report = await apiGetTimetableImportProcessedRows(batchId);
+      setProcessedRowsReport(report);
+      hydrateProcessedBookingState(report);
+    } catch (e) {
+      setProcessedRowsReport(null);
+      setProcessedRowsError(
+        e instanceof Error ? e.message : "Failed to load processed import rows",
+      );
+    } finally {
+      setProcessedRowsLoading(false);
+    }
+  };
+
+  const updateProcessedBookingEdit = (
+    bookingId: number,
+    patch: Partial<ProcessedBookingEditState>,
+  ) => {
+    setProcessedBookingEdits((current) => {
+      const existing = current[bookingId] ?? {
+        roomId: "",
+        startAt: "",
+        endAt: "",
+      };
+
+      return {
+        ...current,
+        [bookingId]: {
+          ...existing,
+          ...patch,
+        },
+      };
+    });
+  };
+
+  const updateNewRowBookingDraft = (
+    rowId: number,
+    patch: Partial<ProcessedBookingEditState>,
+  ) => {
+    setNewRowBookingDrafts((current) => {
+      const existing = current[rowId] ?? {
+        roomId: "",
+        startAt: "",
+        endAt: "",
+      };
+
+      return {
+        ...current,
+        [rowId]: {
+          ...existing,
+          ...patch,
+        },
+      };
+    });
+  };
+
+  const handleSaveProcessedBooking = async (batchId: number, bookingId: number) => {
+    const draft = processedBookingEdits[bookingId];
+
+    if (!draft || draft.roomId === "" || !draft.startAt || !draft.endAt) {
+      setProcessedRowsError("Room, start, and end are required to update a booking");
+      return;
+    }
+
+    setSavingBookingId(bookingId);
+    setProcessedRowsError(null);
+
+    try {
+      await apiUpdateBooking(bookingId, {
+        roomId: draft.roomId,
+        startAt: draft.startAt,
+        endAt: draft.endAt,
+      });
+
+      await loadProcessedRows(batchId);
+    } catch (e) {
+      setProcessedRowsError(e instanceof Error ? e.message : "Failed to update booking");
+    } finally {
+      setSavingBookingId(null);
+    }
+  };
+
+  const handleDeleteProcessedBooking = async (batchId: number, bookingId: number) => {
+    setDeletingBookingId(bookingId);
+    setProcessedRowsError(null);
+
+    try {
+      await apiDeleteBooking(bookingId);
+      await loadProcessedRows(batchId);
+    } catch (e) {
+      setProcessedRowsError(e instanceof Error ? e.message : "Failed to delete booking");
+    } finally {
+      setDeletingBookingId(null);
+    }
+  };
+
+  const handleCreateRowBooking = async (batchId: number, rowId: number) => {
+    const draft = newRowBookingDrafts[rowId];
+
+    if (!draft || draft.roomId === "" || !draft.startAt || !draft.endAt) {
+      setProcessedRowsError("Room, start, and end are required to create a booking");
+      return;
+    }
+
+    setCreatingRowId(rowId);
+    setProcessedRowsError(null);
+
+    try {
+      await apiCreateBooking({
+        roomId: draft.roomId,
+        startAt: draft.startAt,
+        endAt: draft.endAt,
+        metadata: {
+          source: "TIMETABLE_IMPORT",
+          sourceRef: `batch:${batchId}:row:${rowId}:manual-create`,
+        },
+      });
+
+      await loadProcessedRows(batchId);
+    } catch (e) {
+      setProcessedRowsError(e instanceof Error ? e.message : "Failed to create booking");
+    } finally {
+      setCreatingRowId(null);
+    }
+  };
+
   useEffect(() => {
     void loadSlotSystems();
     void loadRoomContext();
@@ -368,10 +790,14 @@ export function TimetableBuilderPage() {
   useEffect(() => {
     if (selectedSystemId === "") {
       setGrid(null);
+      setImportBatches([]);
+      setImportBatchesError(null);
+      setSelectedBatchId("");
       return;
     }
 
     void loadGrid(selectedSystemId);
+    void loadImportBatches(selectedSystemId);
   }, [selectedSystemId]);
 
   const handleCreateSlotSystem = async (event: FormEvent<HTMLFormElement>) => {
@@ -798,7 +1224,9 @@ export function TimetableBuilderPage() {
   const handlePreviewImport = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    if (selectedSystemId === "") {
+    const activeSystemId = selectedSystemId;
+
+    if (activeSystemId === "") {
       setImportError("Select a slot system before uploading");
       return;
     }
@@ -815,36 +1243,25 @@ export function TimetableBuilderPage() {
 
     setImportLoading(true);
     setImportError(null);
+    setImportInfo(null);
     setCommitReport(null);
+    setProcessedRowsReport(null);
+    setProcessedRowsError(null);
 
     try {
       const aliasMap = parseAliasMap(aliasMapText);
 
       const report = await apiPreviewTimetableImport({
-        slotSystemId: selectedSystemId,
+        slotSystemId: activeSystemId,
         termStartDate: importTermStart,
         termEndDate: importTermEnd,
         file: allocationFile,
         aliasMap,
       });
 
-      setPreviewReport(report);
-
-      const initialDecisions: Record<number, RowDecisionState> = {};
-
-      for (const row of report.rows) {
-        if (row.classification === "VALID_AND_AUTOMATABLE") {
-          continue;
-        }
-
-        initialDecisions[row.rowId] = {
-          action: "SKIP",
-          resolvedSlotLabel: row.resolvedSlotLabel ?? row.slot,
-          resolvedRoomId: row.resolvedRoomId ?? "",
-        };
-      }
-
-      setRowDecisions(initialDecisions);
+      hydratePreviewFromBatch(report);
+      await loadProcessedRows(report.batchId);
+      await loadImportBatches(activeSystemId);
     } catch (e) {
       setImportError(e instanceof Error ? e.message : "Failed to preview import");
     } finally {
@@ -852,14 +1269,41 @@ export function TimetableBuilderPage() {
     }
   };
 
+  const loadImportBatchForEditing = async (batchId: number) => {
+    setImportLoading(true);
+    setImportError(null);
+    setImportInfo(null);
+    setCommitReport(null);
+
+    try {
+      const report = await apiGetTimetableImportBatch(batchId);
+
+      hydratePreviewFromBatch(report);
+
+      if (selectedSystemId !== report.slotSystemId) {
+        setSelectedSystemId(report.slotSystemId);
+      }
+
+      await loadProcessedRows(report.batchId);
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Failed to load import batch");
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const handleLoadSelectedBatch = async () => {
+    if (selectedBatchId === "") {
+      setImportError("Choose a batch to load");
+      return;
+    }
+
+    await loadImportBatchForEditing(selectedBatchId);
+  };
+
   const updateRowDecision = (rowId: number, patch: Partial<RowDecisionState>) => {
     setRowDecisions((current) => {
-      const existing =
-        current[rowId] ?? {
-          action: "SKIP" as const,
-          resolvedSlotLabel: "",
-          resolvedRoomId: "" as const,
-        };
+      const existing = current[rowId] ?? createEmptyDecisionState();
 
       return {
         ...current,
@@ -871,48 +1315,209 @@ export function TimetableBuilderPage() {
     });
   };
 
+  const buildImportDecisionsPayload = (): TimetableImportCommitDecision[] => {
+    return Object.entries(rowDecisions).reduce<TimetableImportCommitDecision[]>(
+      (acc, [rawRowId, decision]) => {
+        const rowId = Number(rawRowId);
+
+        if (!Number.isInteger(rowId) || rowId <= 0) {
+          return acc;
+        }
+
+        if (decision.action === "RESOLVE") {
+          const resolveDecision: TimetableImportCommitDecision = {
+            rowId,
+            action: "RESOLVE",
+          };
+
+          const trimmedResolvedSlotLabel = decision.resolvedSlotLabel.trim();
+          const trimmedCreateSlotLabel = decision.createSlotLabel.trim();
+          const trimmedCreateRoomBuilding = decision.createRoomBuildingName.trim();
+          const trimmedCreateRoomName = decision.createRoomName.trim();
+
+          if (decision.slotResolutionMode === "CREATE_SLOT") {
+            if (
+              decision.createSlotDayId !== "" &&
+              decision.createSlotStartBandId !== "" &&
+              decision.createSlotEndBandId !== ""
+            ) {
+              const laneIndex = Number.isFinite(decision.createSlotLaneIndex)
+                ? Math.max(0, Math.trunc(decision.createSlotLaneIndex))
+                : 0;
+
+              resolveDecision.createSlot = {
+                dayId: decision.createSlotDayId,
+                startBandId: decision.createSlotStartBandId,
+                endBandId: decision.createSlotEndBandId,
+                laneIndex,
+                ...(trimmedCreateSlotLabel ? { label: trimmedCreateSlotLabel } : {}),
+              };
+            }
+          } else if (trimmedResolvedSlotLabel) {
+            resolveDecision.resolvedSlotLabel = trimmedResolvedSlotLabel;
+          }
+
+          if (decision.roomResolutionMode === "CREATE_ROOM") {
+            if (trimmedCreateRoomBuilding && trimmedCreateRoomName) {
+              resolveDecision.createRoom = {
+                buildingName: trimmedCreateRoomBuilding,
+                roomName: trimmedCreateRoomName,
+              };
+            }
+          } else if (decision.resolvedRoomId !== "") {
+            resolveDecision.resolvedRoomId = decision.resolvedRoomId;
+          }
+
+          acc.push(resolveDecision);
+
+          return acc;
+        }
+
+        acc.push({
+          rowId,
+          action: decision.action,
+        });
+
+        return acc;
+      },
+      [],
+    );
+  };
+
+  const handleSaveImportDecisions = async () => {
+    if (!previewReport) {
+      return;
+    }
+
+    setSaveDecisionsLoading(true);
+    setImportError(null);
+    setImportInfo(null);
+
+    try {
+      const decisions = buildImportDecisionsPayload();
+      await apiSaveTimetableImportDecisions(previewReport.batchId, decisions);
+
+      const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
+      hydratePreviewFromBatch(refreshedReport);
+      setImportInfo(`Saved allocation decisions for batch #${refreshedReport.batchId}.`);
+
+      await loadProcessedRows(refreshedReport.batchId);
+      await loadImportBatches(refreshedReport.slotSystemId);
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Failed to save decisions");
+    } finally {
+      setSaveDecisionsLoading(false);
+    }
+  };
+
+  const handleReallocateImport = async () => {
+    if (!previewReport) {
+      return;
+    }
+
+    if (previewReport.status !== "COMMITTED") {
+      setImportError("Load a committed batch to run reallocation");
+      return;
+    }
+
+    setReallocateLoading(true);
+    setImportError(null);
+    setImportInfo(null);
+
+    try {
+      const decisions = buildImportDecisionsPayload();
+
+      const report = await apiReallocateTimetableImport(previewReport.batchId, decisions);
+      setCommitReport(report);
+
+      const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
+      hydratePreviewFromBatch(refreshedReport);
+      setImportInfo(`Reallocated committed batch #${refreshedReport.batchId}.`);
+
+      await loadProcessedRows(previewReport.batchId);
+      await loadImportBatches(refreshedReport.slotSystemId);
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Failed to reallocate batch");
+    } finally {
+      setReallocateLoading(false);
+    }
+  };
+
+  const handleDeleteSelectedBatch = async () => {
+    const activeBatchId = selectedBatchId !== "" ? selectedBatchId : previewReport?.batchId;
+
+    if (!activeBatchId) {
+      setImportError("Choose or load a batch first");
+      return;
+    }
+
+    const approved =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(
+            `Delete batch #${activeBatchId}? This will remove all linked imported bookings and cannot be undone.`,
+          );
+
+    if (!approved) {
+      return;
+    }
+
+    setDeleteBatchLoading(true);
+    setImportError(null);
+    setImportInfo(null);
+
+    try {
+      const result = await apiDeleteTimetableImportBatch(activeBatchId);
+
+      if (previewReport?.batchId === activeBatchId) {
+        setPreviewReport(null);
+        setRowDecisions({});
+        setCommitReport(null);
+        setProcessedRowsReport(null);
+        setProcessedRowsError(null);
+        setProcessedBookingEdits({});
+        setNewRowBookingDrafts({});
+      }
+
+      setSelectedBatchId("");
+      await loadImportBatches(selectedSystemId);
+
+      const bookingLabel = result.deletedBookings === 1 ? "booking" : "bookings";
+      setImportInfo(
+        `Deleted batch #${result.batchId} and removed ${result.deletedBookings} linked ${bookingLabel}.`,
+      );
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Failed to delete import batch");
+    } finally {
+      setDeleteBatchLoading(false);
+    }
+  };
+
   const handleCommitImport = async () => {
     if (!previewReport) {
       return;
     }
 
+    if (previewReport.status === "COMMITTED") {
+      setImportError("This batch is already committed");
+      return;
+    }
+
     setCommitLoading(true);
     setImportError(null);
+    setImportInfo(null);
 
     try {
-      const decisions = Object.entries(rowDecisions).reduce<TimetableImportCommitDecision[]>(
-        (acc, [rawRowId, decision]) => {
-          const rowId = Number(rawRowId);
-
-          if (!Number.isInteger(rowId) || rowId <= 0) {
-            return acc;
-          }
-
-          if (decision.action === "RESOLVE") {
-            acc.push({
-              rowId,
-              action: "RESOLVE",
-              resolvedSlotLabel: decision.resolvedSlotLabel,
-              ...(decision.resolvedRoomId !== ""
-                ? { resolvedRoomId: decision.resolvedRoomId }
-                : {}),
-            });
-
-            return acc;
-          }
-
-          acc.push({
-            rowId,
-            action: decision.action,
-          });
-
-          return acc;
-        },
-        [],
-      );
+      const decisions = buildImportDecisionsPayload();
 
       const report = await apiCommitTimetableImport(previewReport.batchId, decisions);
       setCommitReport(report);
+
+      const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
+      hydratePreviewFromBatch(refreshedReport);
+
+      await loadProcessedRows(previewReport.batchId);
+      await loadImportBatches(refreshedReport.slotSystemId);
     } catch (e) {
       setImportError(e instanceof Error ? e.message : "Failed to commit import");
     } finally {
@@ -1020,9 +1625,94 @@ export function TimetableBuilderPage() {
         <div className="card-header">
           <h3>Classroom Allocation Import</h3>
           {previewReport && (
-            <span className="badge badge-role">Batch #{previewReport.batchId}</span>
+            <span className="badge badge-role">
+              Batch #{previewReport.batchId} · {previewReport.status}
+            </span>
           )}
         </div>
+
+        <div className="form-row">
+          <div className="form-field">
+            <label htmlFor="importBatchSelect">Open existing batch</label>
+            <select
+              id="importBatchSelect"
+              className="input"
+              value={selectedBatchId}
+              onChange={(e) =>
+                setSelectedBatchId(e.target.value === "" ? "" : Number(e.target.value))
+              }
+              disabled={
+                selectedSystemId === "" ||
+                importLoading ||
+                commitLoading ||
+                saveDecisionsLoading ||
+                importBatchesLoading
+              }
+            >
+              <option value="">Select a batch</option>
+              {importBatches.map((batch) => (
+                <option key={batch.batchId} value={batch.batchId}>
+                  #{batch.batchId} · {batch.status} · {formatDateDDMMYYYY(batch.termStartDate)} to {formatDateDDMMYYYY(batch.termEndDate)} · {batch.fileName}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-field">
+            <label>Batch actions</label>
+            <div className="btn-group">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void handleLoadSelectedBatch()}
+                disabled={
+                  selectedBatchId === "" ||
+                  importLoading ||
+                  commitLoading ||
+                  saveDecisionsLoading ||
+                  reallocateLoading ||
+                  deleteBatchLoading
+                }
+              >
+                {importLoading ? "Loading..." : "Load Selected Batch"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => void handleDeleteSelectedBatch()}
+                disabled={
+                  (selectedBatchId === "" && !previewReport) ||
+                  importLoading ||
+                  commitLoading ||
+                  saveDecisionsLoading ||
+                  reallocateLoading ||
+                  deleteBatchLoading
+                }
+              >
+                {deleteBatchLoading ? "Deleting..." : "Delete Batch"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => void loadImportBatches(selectedSystemId)}
+                disabled={
+                  selectedSystemId === "" ||
+                  importLoading ||
+                  commitLoading ||
+                  saveDecisionsLoading ||
+                  reallocateLoading ||
+                  deleteBatchLoading ||
+                  importBatchesLoading
+                }
+              >
+                {importBatchesLoading ? "Refreshing..." : "Refresh List"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {importBatchesError && (
+          <div className="alert alert-error mt-4">{importBatchesError}</div>
+        )}
 
         <div className="form-row">
           <div className="form-field">
@@ -1032,7 +1722,13 @@ export function TimetableBuilderPage() {
               mode="date"
               value={importTermStart}
               onChange={setImportTermStart}
-              disabled={importLoading || commitLoading}
+              disabled={
+                importLoading ||
+                commitLoading ||
+                saveDecisionsLoading ||
+                reallocateLoading ||
+                deleteBatchLoading
+              }
             />
           </div>
           <div className="form-field">
@@ -1042,7 +1738,13 @@ export function TimetableBuilderPage() {
               mode="date"
               value={importTermEnd}
               onChange={setImportTermEnd}
-              disabled={importLoading || commitLoading}
+              disabled={
+                importLoading ||
+                commitLoading ||
+                saveDecisionsLoading ||
+                reallocateLoading ||
+                deleteBatchLoading
+              }
             />
           </div>
         </div>
@@ -1057,7 +1759,13 @@ export function TimetableBuilderPage() {
               value={aliasMapText}
               onChange={(e) => setAliasMapText(e.target.value)}
               placeholder={"Alias Name=Canonical Building Name\nECE=Electronics Block"}
-              disabled={importLoading || commitLoading}
+              disabled={
+                importLoading ||
+                commitLoading ||
+                saveDecisionsLoading ||
+                reallocateLoading ||
+                deleteBatchLoading
+              }
             />
           </div>
           <div className="form-field">
@@ -1068,25 +1776,81 @@ export function TimetableBuilderPage() {
               type="file"
               accept=".csv,.xlsx,.xls"
               onChange={(e) => setAllocationFile(e.target.files?.[0] ?? null)}
-              disabled={importLoading || commitLoading}
+              disabled={
+                importLoading ||
+                commitLoading ||
+                saveDecisionsLoading ||
+                reallocateLoading ||
+                deleteBatchLoading
+              }
             />
           </div>
         </div>
 
         <div className="btn-group">
-          <button type="submit" className="btn btn-primary" disabled={importLoading || commitLoading}>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={
+              importLoading ||
+              commitLoading ||
+              saveDecisionsLoading ||
+              reallocateLoading ||
+              deleteBatchLoading
+            }
+          >
             {importLoading ? "Previewing..." : "Preview Upload"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-warning"
+            onClick={() => void handleSaveImportDecisions()}
+            disabled={
+              !previewReport ||
+              saveDecisionsLoading ||
+              commitLoading ||
+              importLoading ||
+              reallocateLoading ||
+              deleteBatchLoading
+            }
+          >
+            {saveDecisionsLoading ? "Saving Decisions..." : "Save Decisions For Later"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-warning"
+            onClick={() => void handleReallocateImport()}
+            disabled={
+              !previewReport ||
+              !isImportBatchCommitted ||
+              reallocateLoading ||
+              saveDecisionsLoading ||
+              commitLoading ||
+              importLoading ||
+              deleteBatchLoading
+            }
+          >
+            {reallocateLoading ? "Reallocating..." : "Reallocate Committed Batch"}
           </button>
           <button
             type="button"
             className="btn btn-success"
             onClick={() => void handleCommitImport()}
-            disabled={!previewReport || commitLoading || importLoading}
+            disabled={
+              !previewReport ||
+              isImportBatchCommitted ||
+              commitLoading ||
+              importLoading ||
+              saveDecisionsLoading ||
+              reallocateLoading ||
+              deleteBatchLoading
+            }
           >
             {commitLoading ? "Committing..." : "Commit Valid/Resolved Rows"}
           </button>
         </div>
 
+        {importInfo && <div className="alert alert-success mt-4">{importInfo}</div>}
         {importError && <div className="alert alert-error mt-4">{importError}</div>}
 
         {previewReport && (
@@ -1104,13 +1868,28 @@ export function TimetableBuilderPage() {
               </div>
             )}
 
+            {isImportBatchCommitted && (
+              <div className="alert" style={{ marginBottom: "var(--space-3)" }}>
+                This batch is committed. You can adjust decisions, save, and run reallocation to regenerate its imported bookings.
+              </div>
+            )}
+
             <div className="data-list">
               {previewReport.rows.map((row) => {
-                const decision = rowDecisions[row.rowId] ?? {
-                  action: "SKIP" as const,
-                  resolvedSlotLabel: row.resolvedSlotLabel ?? row.slot,
-                  resolvedRoomId: row.resolvedRoomId ?? "",
-                };
+                const decision = rowDecisions[row.rowId] ?? createDecisionForPreviewRow(row);
+
+                const selectedStartBandIndex =
+                  decision.createSlotStartBandId === ""
+                    ? undefined
+                    : bandIndexById.get(decision.createSlotStartBandId);
+
+                const createSlotEndBandOptions =
+                  selectedStartBandIndex === undefined
+                    ? timeBands
+                    : timeBands.filter((band) => {
+                        const index = bandIndexById.get(band.id);
+                        return index !== undefined && index >= selectedStartBandIndex;
+                      });
 
                 return (
                   <div className="data-item" key={row.rowId}>
@@ -1137,67 +1916,246 @@ export function TimetableBuilderPage() {
                         </div>
                       )}
 
-                      {row.classification !== "VALID_AND_AUTOMATABLE" && (
-                        <div className="form-row" style={{ marginTop: "var(--space-3)" }}>
-                          <div className="form-field">
-                            <label>Action</label>
-                            <select
-                              className="input"
-                              value={decision.action}
-                              onChange={(e) =>
-                                updateRowDecision(row.rowId, {
-                                  action: e.target.value as RowDecisionState["action"],
-                                })
-                              }
-                              disabled={commitLoading || importLoading}
-                            >
-                              <option value="SKIP">Skip</option>
-                              <option value="RESOLVE">Resolve</option>
-                            </select>
-                          </div>
+                      <div className="form-row" style={{ marginTop: "var(--space-3)" }}>
+                        <div className="form-field">
+                          <label>Action</label>
+                          <select
+                            className="input"
+                            value={decision.action}
+                            onChange={(e) =>
+                              updateRowDecision(row.rowId, {
+                                action: e.target.value as RowDecisionState["action"],
+                              })
+                            }
+                            disabled={isDecisionEditingLocked}
+                          >
+                            {row.classification === "VALID_AND_AUTOMATABLE" && (
+                              <option value="AUTO">Auto</option>
+                            )}
+                            <option value="SKIP">Skip</option>
+                            <option value="RESOLVE">Resolve</option>
+                          </select>
+                        </div>
 
-                          {decision.action === "RESOLVE" && (
-                            <>
+                        {decision.action === "RESOLVE" && (
+                          <>
                               <div className="form-field">
-                                <label>Resolved Slot</label>
-                                <input
-                                  className="input"
-                                  type="text"
-                                  value={decision.resolvedSlotLabel}
-                                  onChange={(e) =>
-                                    updateRowDecision(row.rowId, {
-                                      resolvedSlotLabel: e.target.value,
-                                    })
-                                  }
-                                  placeholder="Exact slot label"
-                                  disabled={commitLoading || importLoading}
-                                />
-                              </div>
-                              <div className="form-field">
-                                <label>Resolved Room</label>
+                                <label>Slot Resolution</label>
                                 <select
                                   className="input"
-                                  value={decision.resolvedRoomId}
+                                  value={decision.slotResolutionMode}
                                   onChange={(e) =>
                                     updateRowDecision(row.rowId, {
-                                      resolvedRoomId:
-                                        e.target.value === "" ? "" : Number(e.target.value),
+                                      slotResolutionMode: e.target.value as SlotResolutionMode,
                                     })
                                   }
-                                  disabled={commitLoading || importLoading}
+                                  disabled={isDecisionEditingLocked}
                                 >
-                                  <option value="">Select room</option>
-                                  {rooms.map((room) => (
-                                    <option key={room.id} value={room.id}>
-                                      {roomLabelById.get(room.id) ?? `Room #${room.id}`}
-                                    </option>
-                                  ))}
+                                  <option value="SELECT_EXISTING">Select existing slot</option>
+                                  <option value="CREATE_SLOT">Create slot in grid</option>
                                 </select>
                               </div>
-                            </>
-                          )}
-                        </div>
-                      )}
+                              <div className="form-field">
+                                <label>Room Resolution</label>
+                                <select
+                                  className="input"
+                                  value={decision.roomResolutionMode}
+                                  onChange={(e) =>
+                                    updateRowDecision(row.rowId, {
+                                      roomResolutionMode: e.target.value as RoomResolutionMode,
+                                    })
+                                  }
+                                  disabled={isDecisionEditingLocked}
+                                >
+                                  <option value="SELECT_EXISTING">Select existing room</option>
+                                  <option value="CREATE_ROOM">Create room</option>
+                                </select>
+                              </div>
+
+                              {decision.slotResolutionMode === "SELECT_EXISTING" ? (
+                                <div className="form-field">
+                                  <label>Resolved Slot Label</label>
+                                  <input
+                                    className="input"
+                                    type="text"
+                                    list={`slot-label-options-${row.rowId}`}
+                                    value={decision.resolvedSlotLabel}
+                                    onChange={(e) =>
+                                      updateRowDecision(row.rowId, {
+                                        resolvedSlotLabel: e.target.value,
+                                      })
+                                    }
+                                    placeholder="Exact slot label"
+                                    disabled={isDecisionEditingLocked}
+                                  />
+                                  <datalist id={`slot-label-options-${row.rowId}`}>
+                                    {slotLabelOptions.map((label) => (
+                                      <option key={label} value={label} />
+                                    ))}
+                                  </datalist>
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="form-field">
+                                    <label>New Slot Label</label>
+                                    <input
+                                      className="input"
+                                      type="text"
+                                      value={decision.createSlotLabel}
+                                      onChange={(e) =>
+                                        updateRowDecision(row.rowId, {
+                                          createSlotLabel: e.target.value,
+                                        })
+                                      }
+                                      placeholder="e.g. L12"
+                                      disabled={isDecisionEditingLocked}
+                                    />
+                                  </div>
+                                  <div className="form-field">
+                                    <label>Slot Day</label>
+                                    <select
+                                      className="input"
+                                      value={decision.createSlotDayId}
+                                      onChange={(e) =>
+                                        updateRowDecision(row.rowId, {
+                                          createSlotDayId:
+                                            e.target.value === "" ? "" : Number(e.target.value),
+                                        })
+                                      }
+                                      disabled={isDecisionEditingLocked}
+                                    >
+                                      <option value="">Select day</option>
+                                      {days.map((day) => (
+                                        <option key={day.id} value={day.id}>
+                                          {DAY_LABELS[day.dayOfWeek]} (lanes: {day.laneCount})
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div className="form-field">
+                                    <label>Slot Start Band</label>
+                                    <select
+                                      className="input"
+                                      value={decision.createSlotStartBandId}
+                                      onChange={(e) => {
+                                        const startBandId =
+                                          e.target.value === "" ? "" : Number(e.target.value);
+
+                                        updateRowDecision(row.rowId, {
+                                          createSlotStartBandId: startBandId,
+                                          createSlotEndBandId:
+                                            startBandId === "" ? "" : startBandId,
+                                        });
+                                      }}
+                                      disabled={isDecisionEditingLocked}
+                                    >
+                                      <option value="">Select start band</option>
+                                      {timeBands.map((band) => (
+                                        <option key={band.id} value={band.id}>
+                                          {toTimeLabel(String(band.startTime))} - {toTimeLabel(String(band.endTime))}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div className="form-field">
+                                    <label>Slot End Band</label>
+                                    <select
+                                      className="input"
+                                      value={decision.createSlotEndBandId}
+                                      onChange={(e) =>
+                                        updateRowDecision(row.rowId, {
+                                          createSlotEndBandId:
+                                            e.target.value === "" ? "" : Number(e.target.value),
+                                        })
+                                      }
+                                      disabled={isDecisionEditingLocked}
+                                    >
+                                      <option value="">Select end band</option>
+                                      {createSlotEndBandOptions.map((band) => (
+                                        <option key={band.id} value={band.id}>
+                                          {toTimeLabel(String(band.startTime))} - {toTimeLabel(String(band.endTime))}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div className="form-field">
+                                    <label>Slot Lane Index</label>
+                                    <input
+                                      className="input"
+                                      type="number"
+                                      min={0}
+                                      step={1}
+                                      value={decision.createSlotLaneIndex}
+                                      onChange={(e) =>
+                                        updateRowDecision(row.rowId, {
+                                          createSlotLaneIndex: Number(e.target.value || "0"),
+                                        })
+                                      }
+                                      disabled={isDecisionEditingLocked}
+                                    />
+                                  </div>
+                                </>
+                              )}
+
+                              {decision.roomResolutionMode === "SELECT_EXISTING" ? (
+                                <div className="form-field">
+                                  <label>Resolved Room</label>
+                                  <select
+                                    className="input"
+                                    value={decision.resolvedRoomId}
+                                    onChange={(e) =>
+                                      updateRowDecision(row.rowId, {
+                                        resolvedRoomId:
+                                          e.target.value === "" ? "" : Number(e.target.value),
+                                      })
+                                    }
+                                    disabled={isDecisionEditingLocked}
+                                  >
+                                    <option value="">Select room</option>
+                                    {rooms.map((room) => (
+                                      <option key={room.id} value={room.id}>
+                                        {roomLabelById.get(room.id) ?? `Room #${room.id}`}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="form-field">
+                                    <label>New Room Building</label>
+                                    <input
+                                      className="input"
+                                      type="text"
+                                      value={decision.createRoomBuildingName}
+                                      onChange={(e) =>
+                                        updateRowDecision(row.rowId, {
+                                          createRoomBuildingName: e.target.value,
+                                        })
+                                      }
+                                      placeholder="e.g. Civil Block"
+                                      disabled={isDecisionEditingLocked}
+                                    />
+                                  </div>
+                                  <div className="form-field">
+                                    <label>New Room Name</label>
+                                    <input
+                                      className="input"
+                                      type="text"
+                                      value={decision.createRoomName}
+                                      onChange={(e) =>
+                                        updateRowDecision(row.rowId, {
+                                          createRoomName: e.target.value,
+                                        })
+                                      }
+                                      placeholder="e.g. 204"
+                                      disabled={isDecisionEditingLocked}
+                                    />
+                                  </div>
+                                </>
+                              )}
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -1212,6 +2170,12 @@ export function TimetableBuilderPage() {
               Commit {commitReport.status} · Created {commitReport.autoCreatedBookings} · Already Processed {commitReport.alreadyProcessedBookings} · Failed {commitReport.failedOccurrences}
             </div>
 
+            {commitReport.bookingConflictOccurrences > 0 && (
+              <div className="alert" style={{ marginTop: "var(--space-2)" }}>
+                Current bookings blocked {commitReport.bookingConflictOccurrences} occurrence(s) across {commitReport.bookingConflictRows} row(s).
+              </div>
+            )}
+
             <div className="data-list" style={{ marginTop: "var(--space-3)" }}>
               {commitReport.rowResults.map((row) => (
                 <div className="data-item" key={row.rowId}>
@@ -1222,10 +2186,288 @@ export function TimetableBuilderPage() {
                     <div className="data-item-subtitle">
                       Created {row.created} · Already Processed {row.alreadyProcessed} · Failed {row.failed} · Unresolved {row.unresolved}
                     </div>
+
+                    {row.bookingConflictReasons.length > 0 && (
+                      <div className="alert" style={{ marginTop: "var(--space-2)" }}>
+                        Booking conflicts: {row.bookingConflictReasons.join(" | ")}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {(processedRowsLoading || processedRowsError || processedRowsReport) && (
+          <div className="mt-4">
+            <div className="card-header" style={{ marginBottom: "var(--space-2)" }}>
+              <h3>Processed Rows And Booking CRUD</h3>
+              {processedRowsReport && (
+                <span className="badge badge-role">
+                  Batch #{processedRowsReport.batchId} · {processedRowsReport.status}
+                </span>
+              )}
+            </div>
+
+            {processedRowsLoading && (
+              <p className="loading-text">Loading processed rows...</p>
+            )}
+
+            {processedRowsError && (
+              <div className="alert alert-error" style={{ marginBottom: "var(--space-3)" }}>
+                {processedRowsError}
+              </div>
+            )}
+
+            {processedRowsReport && processedRowsReport.warnings.length > 0 && (
+              <div className="alert" style={{ marginBottom: "var(--space-3)" }}>
+                {processedRowsReport.warnings.join(" | ")}
+              </div>
+            )}
+
+            {processedRowsReport && processedRowsReport.rows.length === 0 && (
+              <p className="empty-text">No processed rows found for this batch yet.</p>
+            )}
+
+            {processedRowsReport && processedRowsReport.rows.length > 0 && (
+              <div className="data-list">
+                {processedRowsReport.rows.map((row) => {
+                  const createDraft = newRowBookingDrafts[row.rowId] ?? {
+                    roomId: row.resolvedRoomId ?? "",
+                    startAt: "",
+                    endAt: "",
+                  };
+
+                  return (
+                    <div className="data-item" key={`processed-row-${row.rowId}`}>
+                      <div className="data-item-content" style={{ width: "100%" }}>
+                        <div className="data-item-title">
+                          Row {row.rowIndex} · Action {row.action}
+                          <span className="badge badge-role" style={{ marginLeft: "var(--space-2)" }}>
+                            {row.classification}
+                          </span>
+                        </div>
+                        <div className="data-item-subtitle">
+                          Resolved Slot: {row.resolvedSlotLabel || "-"} · Resolved Room: {row.resolvedRoomId ?? "-"}
+                        </div>
+                        <div className="empty-text" style={{ marginTop: "var(--space-1)" }}>
+                          Created {row.created} · Already Processed {row.alreadyProcessed} · Failed {row.failed} · Skipped {row.skipped}
+                        </div>
+
+                        {row.reasons.length > 0 && (
+                          <div className="loading-text" style={{ marginTop: "var(--space-1)" }}>
+                            Reasons: {row.reasons.join(" | ")}
+                          </div>
+                        )}
+
+                        {row.bookingConflictReasons.length > 0 && (
+                          <div className="alert" style={{ marginTop: "var(--space-2)" }}>
+                            Booking conflicts with current schedule: {row.bookingConflictReasons.join(" | ")}
+                          </div>
+                        )}
+
+                        {row.occurrences.length === 0 && (
+                          <p className="empty-text" style={{ marginTop: "var(--space-2)" }}>
+                            No occurrences generated for this row.
+                          </p>
+                        )}
+
+                        {row.occurrences.map((occurrence) => {
+                          const bookingEdit = occurrence.booking
+                            ? processedBookingEdits[occurrence.booking.id] ?? {
+                                roomId: occurrence.booking.roomId,
+                                startAt: toDateInputValue(occurrence.booking.startAt),
+                                endAt: toDateInputValue(occurrence.booking.endAt),
+                              }
+                            : null;
+
+                          return (
+                            <div
+                              key={`occurrence-${occurrence.occurrenceId}`}
+                              className="card"
+                              style={{ marginTop: "var(--space-3)" }}
+                            >
+                              <div className="data-item-title">
+                                Occurrence #{occurrence.occurrenceId} · {occurrence.status}
+                              </div>
+                              <div className="data-item-subtitle">
+                                {formatDateDDMMYYYY(occurrence.startAt)} to {formatDateDDMMYYYY(occurrence.endAt)} · Room #{occurrence.roomId}
+                              </div>
+
+                              {occurrence.errorMessage && (
+                                <div className="alert alert-error" style={{ marginTop: "var(--space-2)" }}>
+                                  {occurrence.errorMessage}
+                                </div>
+                              )}
+
+                              {occurrence.booking && bookingEdit ? (
+                                <div className="form-row" style={{ marginTop: "var(--space-3)" }}>
+                                  <div className="form-field">
+                                    <label>Booking Room</label>
+                                    <select
+                                      className="input"
+                                      value={bookingEdit.roomId}
+                                      onChange={(e) =>
+                                        updateProcessedBookingEdit(occurrence.booking!.id, {
+                                          roomId:
+                                            e.target.value === "" ? "" : Number(e.target.value),
+                                        })
+                                      }
+                                      disabled={savingBookingId === occurrence.booking.id}
+                                    >
+                                      <option value="">Select room</option>
+                                      {rooms.map((roomOption) => (
+                                        <option key={roomOption.id} value={roomOption.id}>
+                                          {roomLabelById.get(roomOption.id) ?? `Room #${roomOption.id}`}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+
+                                  <div className="form-field">
+                                    <label>Booking Start</label>
+                                    <DateInput
+                                      mode="datetime"
+                                      value={bookingEdit.startAt}
+                                      onChange={(nextValue) =>
+                                        updateProcessedBookingEdit(occurrence.booking!.id, {
+                                          startAt: nextValue,
+                                        })
+                                      }
+                                      disabled={savingBookingId === occurrence.booking.id}
+                                    />
+                                  </div>
+
+                                  <div className="form-field">
+                                    <label>Booking End</label>
+                                    <DateInput
+                                      mode="datetime"
+                                      value={bookingEdit.endAt}
+                                      onChange={(nextValue) =>
+                                        updateProcessedBookingEdit(occurrence.booking!.id, {
+                                          endAt: nextValue,
+                                        })
+                                      }
+                                      disabled={savingBookingId === occurrence.booking.id}
+                                    />
+                                  </div>
+
+                                  <div className="form-field">
+                                    <label>Actions</label>
+                                    <div className="btn-group">
+                                      <button
+                                        type="button"
+                                        className="btn btn-primary btn-sm"
+                                        onClick={() =>
+                                          void handleSaveProcessedBooking(
+                                            processedRowsReport.batchId,
+                                            occurrence.booking!.id,
+                                          )
+                                        }
+                                        disabled={savingBookingId === occurrence.booking.id}
+                                      >
+                                        {savingBookingId === occurrence.booking.id
+                                          ? "Saving..."
+                                          : "Update Booking"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="btn btn-danger btn-sm"
+                                        onClick={() =>
+                                          void handleDeleteProcessedBooking(
+                                            processedRowsReport.batchId,
+                                            occurrence.booking!.id,
+                                          )
+                                        }
+                                        disabled={deletingBookingId === occurrence.booking.id}
+                                      >
+                                        {deletingBookingId === occurrence.booking.id
+                                          ? "Deleting..."
+                                          : "Delete Booking"}
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="empty-text" style={{ marginTop: "var(--space-2)" }}>
+                                  No linked booking for this occurrence.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+
+                        <div className="form-row" style={{ marginTop: "var(--space-3)" }}>
+                          <div className="form-field">
+                            <label>Create Booking Room</label>
+                            <select
+                              className="input"
+                              value={createDraft.roomId}
+                              onChange={(e) =>
+                                updateNewRowBookingDraft(row.rowId, {
+                                  roomId: e.target.value === "" ? "" : Number(e.target.value),
+                                })
+                              }
+                              disabled={creatingRowId === row.rowId}
+                            >
+                              <option value="">Select room</option>
+                              {rooms.map((roomOption) => (
+                                <option key={roomOption.id} value={roomOption.id}>
+                                  {roomLabelById.get(roomOption.id) ?? `Room #${roomOption.id}`}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="form-field">
+                            <label>Create Booking Start</label>
+                            <DateInput
+                              mode="datetime"
+                              value={createDraft.startAt}
+                              onChange={(nextValue) =>
+                                updateNewRowBookingDraft(row.rowId, {
+                                  startAt: nextValue,
+                                })
+                              }
+                              disabled={creatingRowId === row.rowId}
+                            />
+                          </div>
+
+                          <div className="form-field">
+                            <label>Create Booking End</label>
+                            <DateInput
+                              mode="datetime"
+                              value={createDraft.endAt}
+                              onChange={(nextValue) =>
+                                updateNewRowBookingDraft(row.rowId, {
+                                  endAt: nextValue,
+                                })
+                              }
+                              disabled={creatingRowId === row.rowId}
+                            />
+                          </div>
+
+                          <div className="form-field">
+                            <label>Create</label>
+                            <button
+                              type="button"
+                              className="btn btn-success btn-sm"
+                              onClick={() =>
+                                void handleCreateRowBooking(processedRowsReport.batchId, row.rowId)
+                              }
+                              disabled={creatingRowId === row.rowId}
+                            >
+                              {creatingRowId === row.rowId ? "Creating..." : "Create Booking"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </form>

@@ -30,6 +30,8 @@ export type BookingStatus =
   | "REJECTED"
   | "CANCELLED";
 
+export type BookingSource = "MANUAL" | "BOOKING_REQUEST" | "TIMETABLE_IMPORT";
+
 export type BookingRequest = {
   id: number;
   userId: number | null;
@@ -47,6 +49,8 @@ export type Booking = {
   startAt: string;
   endAt: string;
   requestId: number | null;
+  source: BookingSource;
+  sourceRef: string | null;
 };
 
 export type BookingPruneScope = "all" | "slot-system";
@@ -139,6 +143,7 @@ export type TimetableImportPreviewRow = {
 export type TimetableImportPreviewReport = {
   batchId: number;
   reused: boolean;
+  status: "PREVIEWED" | "COMMITTED";
   slotSystemId: number;
   termStartDate: string;
   termEndDate: string;
@@ -146,7 +151,55 @@ export type TimetableImportPreviewReport = {
   validRows: number;
   unresolvedRows: number;
   warnings: string[];
+  savedDecisions: TimetableImportSavedDecision[];
   rows: TimetableImportPreviewRow[];
+};
+
+export type TimetableImportSavedDecision = {
+  rowId: number;
+  action: "AUTO" | "RESOLVE" | "SKIP";
+  resolvedSlotLabel: string | null;
+  resolvedRoomId: number | null;
+  createSlot: TimetableImportCreateSlotDecision | null;
+  createRoom: TimetableImportCreateRoomDecision | null;
+  updatedAt: string;
+};
+
+export type TimetableImportBatchSummary = {
+  batchId: number;
+  slotSystemId: number;
+  slotSystemName: string;
+  fileName: string;
+  status: "PREVIEWED" | "COMMITTED";
+  termStartDate: string;
+  termEndDate: string;
+  createdAt: string;
+  committedAt: string | null;
+};
+
+export type TimetableImportDecisionSaveReport = {
+  batchId: number;
+  status: "PREVIEWED" | "COMMITTED";
+  savedDecisions: TimetableImportSavedDecision[];
+};
+
+export type TimetableImportBatchDeleteReport = {
+  batchId: number;
+  status: "DELETED";
+  deletedBookings: number;
+};
+
+export type TimetableImportCreateSlotDecision = {
+  dayId: number;
+  startBandId: number;
+  endBandId: number;
+  laneIndex?: number;
+  label?: string;
+};
+
+export type TimetableImportCreateRoomDecision = {
+  buildingName: string;
+  roomName: string;
 };
 
 export type TimetableImportCommitDecision = {
@@ -154,6 +207,8 @@ export type TimetableImportCommitDecision = {
   action: "AUTO" | "RESOLVE" | "SKIP";
   resolvedSlotLabel?: string;
   resolvedRoomId?: number;
+  createSlot?: TimetableImportCreateSlotDecision;
+  createRoom?: TimetableImportCreateRoomDecision;
 };
 
 export type TimetableImportCommitRowResult = {
@@ -167,6 +222,7 @@ export type TimetableImportCommitRowResult = {
   alreadyProcessed: number;
   unresolved: number;
   reasons: string[];
+  bookingConflictReasons: string[];
 };
 
 export type TimetableImportCommitReport = {
@@ -178,8 +234,58 @@ export type TimetableImportCommitReport = {
   failedOccurrences: number;
   unresolvedRows: number;
   skippedRows: number;
+  bookingConflictRows: number;
+  bookingConflictOccurrences: number;
   rowResults: TimetableImportCommitRowResult[];
   warnings: string[];
+};
+
+export type TimetableImportProcessedOccurrenceStatus =
+  | "PENDING"
+  | "CREATED"
+  | "FAILED"
+  | "SKIPPED"
+  | "UNRESOLVED"
+  | "ALREADY_PROCESSED";
+
+export type TimetableImportProcessedOccurrence = {
+  occurrenceId: number;
+  status: TimetableImportProcessedOccurrenceStatus;
+  roomId: number;
+  startAt: string;
+  endAt: string;
+  sourceRef: string | null;
+  errorMessage: string | null;
+  booking: Booking | null;
+};
+
+export type TimetableImportProcessedRow = {
+  rowId: number;
+  rowIndex: number;
+  classification: TimetableImportRowStatus;
+  courseCode: string;
+  slot: string;
+  classroom: string;
+  action: "AUTO" | "RESOLVE" | "SKIP";
+  resolvedSlotLabel: string | null;
+  resolvedRoomId: number | null;
+  createSlot: TimetableImportCreateSlotDecision | null;
+  createRoom: TimetableImportCreateRoomDecision | null;
+  created: number;
+  failed: number;
+  skipped: number;
+  alreadyProcessed: number;
+  unresolved: number;
+  reasons: string[];
+  bookingConflictReasons: string[];
+  occurrences: TimetableImportProcessedOccurrence[];
+};
+
+export type TimetableImportProcessedRowsReport = {
+  batchId: number;
+  status: "PREVIEWED" | "COMMITTED";
+  warnings: string[];
+  rows: TimetableImportProcessedRow[];
 };
 
 type LoginResponse = {
@@ -194,6 +300,10 @@ type ApiErrorPayload = {
 
 type BuildingsListResponse = {
   data: Building[];
+};
+
+type TimetableImportBatchListResponse = {
+  data: TimetableImportBatchSummary[];
 };
 
 /* ===== Auth Helpers ===== */
@@ -467,9 +577,27 @@ export async function createBooking(input: {
   roomId: number;
   startAt: string;
   endAt: string;
+  metadata?: {
+    source?: BookingSource;
+    sourceRef?: string;
+  };
 }): Promise<Booking> {
   return request<Booking>("/bookings", {
     method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateBooking(
+  id: number,
+  input: {
+    roomId?: number;
+    startAt?: string;
+    endAt?: string;
+  }
+): Promise<Booking> {
+  return request<Booking>(`/bookings/${id}`, {
+    method: "PATCH",
     body: JSON.stringify(input),
   });
 }
@@ -627,6 +755,44 @@ export async function deleteBlock(blockId: number): Promise<void> {
   });
 }
 
+export async function getTimetableImportBatches(input?: {
+  slotSystemId?: number;
+  limit?: number;
+}): Promise<TimetableImportBatchSummary[]> {
+  const params = new URLSearchParams();
+
+  if (input?.slotSystemId !== undefined) {
+    params.set("slotSystemId", String(input.slotSystemId));
+  }
+
+  if (input?.limit !== undefined) {
+    params.set("limit", String(input.limit));
+  }
+
+  const query = params.toString();
+  const response = await request<TimetableImportBatchListResponse>(
+    `/timetable/imports${query ? `?${query}` : ""}`,
+  );
+
+  return response.data;
+}
+
+export async function getTimetableImportBatch(
+  batchId: number,
+): Promise<TimetableImportPreviewReport> {
+  return request<TimetableImportPreviewReport>(`/timetable/imports/${batchId}`);
+}
+
+export async function saveTimetableImportDecisions(
+  batchId: number,
+  decisions: TimetableImportCommitDecision[],
+): Promise<TimetableImportDecisionSaveReport> {
+  return request<TimetableImportDecisionSaveReport>(`/timetable/imports/${batchId}/decisions`, {
+    method: "PUT",
+    body: JSON.stringify({ decisions }),
+  });
+}
+
 export async function previewTimetableImport(input: {
   slotSystemId: number;
   termStartDate: string;
@@ -655,4 +821,30 @@ export async function commitTimetableImport(
     method: "POST",
     body: JSON.stringify({ decisions }),
   });
+}
+
+export async function reallocateTimetableImport(
+  batchId: number,
+  decisions: TimetableImportCommitDecision[],
+): Promise<TimetableImportCommitReport> {
+  return request<TimetableImportCommitReport>(`/timetable/imports/${batchId}/reallocate`, {
+    method: "POST",
+    body: JSON.stringify({ decisions }),
+  });
+}
+
+export async function deleteTimetableImportBatch(
+  batchId: number,
+): Promise<TimetableImportBatchDeleteReport> {
+  return request<TimetableImportBatchDeleteReport>(`/timetable/imports/${batchId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getTimetableImportProcessedRows(
+  batchId: number,
+): Promise<TimetableImportProcessedRowsReport> {
+  return request<TimetableImportProcessedRowsReport>(
+    `/timetable/imports/${batchId}/processed-rows`,
+  );
 }

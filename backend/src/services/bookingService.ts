@@ -1,4 +1,4 @@
-import { and, eq, gt, lt } from "drizzle-orm";
+import { and, eq, gt, lt, ne } from "drizzle-orm";
 import { db } from "../db";
 import { bookings, rooms } from "../db/schema";
 
@@ -14,8 +14,10 @@ const FORBIDDEN_SLOT_KEYS = [
   "dayId",
 ] as const;
 
+export type BookingSource = "MANUAL" | "BOOKING_REQUEST" | "TIMETABLE_IMPORT";
+
 export type BookingSourceMetadata = {
-  source?: string;
+  source?: BookingSource;
   sourceRef?: string;
 };
 
@@ -42,10 +44,34 @@ export type BookingCreateSuccess = {
     startAt: Date;
     endAt: Date;
     requestId: number | null;
+    source: BookingSource;
+    sourceRef: string | null;
   };
 };
 
 export type BookingCreateResult = BookingCreateSuccess | BookingCreateFailure;
+
+export type UpdateBookingInput = {
+  bookingId: number;
+  roomId?: number;
+  startAt?: string | Date;
+  endAt?: string | Date;
+};
+
+export type BookingUpdateSuccess = {
+  ok: true;
+  booking: {
+    id: number;
+    roomId: number;
+    startAt: Date;
+    endAt: Date;
+    requestId: number | null;
+    source: BookingSource;
+    sourceRef: string | null;
+  };
+};
+
+export type BookingUpdateResult = BookingUpdateSuccess | BookingCreateFailure;
 
 export type BulkBookingItemInput = {
   roomId: unknown;
@@ -158,11 +184,31 @@ function normalizeCreateInput(raw: CreateBookingInput | BulkBookingItemInput) {
     throw createBookingServiceError(400, "INVALID_REQUEST_ID", "Invalid requestId");
   }
 
+  const sourceRaw = (raw as CreateBookingInput).metadata?.source;
+  const source: BookingSource =
+    sourceRaw ?? (requestId !== null ? "BOOKING_REQUEST" : "MANUAL");
+
+  if (
+    source !== "MANUAL" &&
+    source !== "BOOKING_REQUEST" &&
+    source !== "TIMETABLE_IMPORT"
+  ) {
+    throw createBookingServiceError(400, "INVALID_SOURCE", "Invalid booking source");
+  }
+
+  const sourceRefRaw = (raw as CreateBookingInput).metadata?.sourceRef;
+  const sourceRef =
+    typeof sourceRefRaw === "string" && sourceRefRaw.trim()
+      ? sourceRefRaw.trim()
+      : null;
+
   return {
     roomId: parsedRoomId,
     startAt,
     endAt,
     requestId,
+    source,
+    sourceRef,
   };
 }
 
@@ -183,17 +229,22 @@ export async function hasBookingOverlap(
   startAt: Date,
   endAt: Date,
   executor: DbExecutor = db,
+  excludeBookingId?: number,
 ) {
+  const overlapConditions = [
+    eq(bookings.roomId, roomId),
+    lt(bookings.startAt, endAt),
+    gt(bookings.endAt, startAt),
+  ];
+
+  if (typeof excludeBookingId === "number" && excludeBookingId > 0) {
+    overlapConditions.push(ne(bookings.id, excludeBookingId));
+  }
+
   const overlapping = await executor
     .select({ id: bookings.id })
     .from(bookings)
-    .where(
-      and(
-        eq(bookings.roomId, roomId),
-        lt(bookings.startAt, endAt),
-        gt(bookings.endAt, startAt),
-      ),
-    )
+    .where(and(...overlapConditions))
     .limit(1);
 
   return overlapping.length > 0;
@@ -231,6 +282,8 @@ export async function createBooking(
         startAt: input.startAt,
         endAt: input.endAt,
         requestId: input.requestId,
+        source: input.source,
+        sourceRef: input.sourceRef,
       })
       .returning();
 
@@ -284,6 +337,151 @@ export async function createBooking(
       status: 500,
       code: "BOOKING_CREATE_FAILED",
       message: "Insert failed",
+    };
+  }
+}
+
+export async function updateBooking(
+  raw: UpdateBookingInput,
+  executor: DbExecutor = db,
+): Promise<BookingUpdateResult> {
+  try {
+    const bookingId = Number(raw.bookingId);
+
+    if (!Number.isInteger(bookingId) || bookingId <= 0) {
+      return {
+        ok: false,
+        status: 400,
+        code: "INVALID_BOOKING_ID",
+        message: "Invalid booking id",
+      };
+    }
+
+    const existingRows = await executor
+      .select()
+      .from(bookings)
+      .where(eq(bookings.id, bookingId))
+      .limit(1);
+
+    const existing = existingRows[0];
+
+    if (!existing) {
+      return {
+        ok: false,
+        status: 404,
+        code: "BOOKING_NOT_FOUND",
+        message: "Booking not found",
+      };
+    }
+
+    const roomId = raw.roomId === undefined ? existing.roomId : Number(raw.roomId);
+
+    if (!Number.isInteger(roomId) || roomId <= 0) {
+      return {
+        ok: false,
+        status: 400,
+        code: "INVALID_ROOM_ID",
+        message: "Invalid roomId",
+      };
+    }
+
+    const startAt =
+      raw.startAt === undefined ? new Date(existing.startAt) : new Date(raw.startAt);
+    const endAt = raw.endAt === undefined ? new Date(existing.endAt) : new Date(raw.endAt);
+
+    if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
+      return {
+        ok: false,
+        status: 400,
+        code: "INVALID_DATETIME",
+        message: "Invalid datetime format",
+      };
+    }
+
+    if (startAt >= endAt) {
+      return {
+        ok: false,
+        status: 400,
+        code: "INVALID_INTERVAL",
+        message: "startAt must be before endAt",
+      };
+    }
+
+    await ensureRoomExists(roomId, executor);
+
+    const overlap = await hasBookingOverlap(roomId, startAt, endAt, executor, bookingId);
+
+    if (overlap) {
+      return {
+        ok: false,
+        status: 409,
+        code: "ROOM_OVERLAP",
+        message: "Room already booked for this time range",
+      };
+    }
+
+    const updatedRows = await executor
+      .update(bookings)
+      .set({
+        roomId,
+        startAt,
+        endAt,
+      })
+      .where(eq(bookings.id, bookingId))
+      .returning();
+
+    const updated = updatedRows[0];
+
+    if (!updated) {
+      return {
+        ok: false,
+        status: 500,
+        code: "BOOKING_UPDATE_FAILED",
+        message: "Update failed",
+      };
+    }
+
+    return {
+      ok: true,
+      booking: updated,
+    };
+  } catch (error: unknown) {
+    const typedError = error as Partial<BookingServiceError> & {
+      cause?: { code?: string };
+    };
+
+    if (typeof typedError.status === "number" && typeof typedError.code === "string") {
+      return {
+        ok: false,
+        status: typedError.status,
+        code: typedError.code,
+        message: typedError.message ?? "Booking validation failed",
+      };
+    }
+
+    if (typedError?.cause?.code === "23503") {
+      return {
+        ok: false,
+        status: 404,
+        code: "ROOM_NOT_FOUND",
+        message: "Room not found",
+      };
+    }
+
+    if (typedError?.cause?.code === "23P01") {
+      return {
+        ok: false,
+        status: 409,
+        code: "ROOM_OVERLAP",
+        message: "Room already booked for this time range",
+      };
+    }
+
+    return {
+      ok: false,
+      status: 500,
+      code: "BOOKING_UPDATE_FAILED",
+      message: "Update failed",
     };
   }
 }

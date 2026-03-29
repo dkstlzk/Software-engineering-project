@@ -17,7 +17,16 @@ import {
   isTimetableServiceError,
   updateTimeBand,
 } from "./service";
-import { commitTimetableImport, previewTimetableImport } from "./importService";
+import {
+  commitTimetableImport,
+  deleteTimetableImportBatch,
+  getTimetableImportBatch,
+  getTimetableImportProcessedRows,
+  listTimetableImportBatches,
+  previewTimetableImport,
+  reallocateTimetableImport,
+  saveTimetableImportDecisions,
+} from "./importService";
 
 function parsePositiveInteger(value: unknown): number | null {
   const parsed = Number(value);
@@ -413,6 +422,116 @@ export async function handlePreviewImport(req: Request, res: Response) {
   }
 }
 
+export async function handleListImportBatches(req: Request, res: Response) {
+  try {
+    const slotSystemIdRaw = req.query.slotSystemId;
+    const limitRaw = req.query.limit;
+
+    let slotSystemId: number | undefined;
+
+    if (slotSystemIdRaw !== undefined) {
+      const parsedSlotSystemId = parsePositiveInteger(slotSystemIdRaw);
+
+      if (!parsedSlotSystemId) {
+        return res.status(400).json({ error: "Invalid slotSystemId" });
+      }
+
+      slotSystemId = parsedSlotSystemId;
+    }
+
+    const parsedLimit =
+      limitRaw === undefined ? undefined : Number(limitRaw);
+
+    if (
+      parsedLimit !== undefined &&
+      (!Number.isInteger(parsedLimit) || parsedLimit <= 0)
+    ) {
+      return res.status(400).json({ error: "Invalid limit" });
+    }
+
+    const batches = await listTimetableImportBatches({
+      ...(slotSystemId !== undefined ? { slotSystemId } : {}),
+      ...(parsedLimit !== undefined ? { limit: parsedLimit } : {}),
+    });
+
+    return res.json({
+      data: batches,
+    });
+  } catch (error) {
+    return sendError(res, error, "Failed to list import batches");
+  }
+}
+
+export async function handleGetImportBatch(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    const report = await getTimetableImportBatch(batchId);
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to fetch import batch");
+  }
+}
+
+export async function handleSaveImportDecisions(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    const report = await saveTimetableImportDecisions({
+      batchId,
+      decisions: req.body?.decisions,
+    });
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to save import decisions");
+  }
+}
+
+export async function handleReallocateImport(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    const report = await reallocateTimetableImport({
+      batchId,
+      decisions: req.body?.decisions,
+    });
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to reallocate committed import");
+  }
+}
+
+export async function handleDeleteImportBatch(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    const report = await deleteTimetableImportBatch({ batchId });
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to delete import batch");
+  }
+}
+
 export async function handleCommitImport(req: Request, res: Response) {
   try {
     const batchId = parsePositiveInteger(req.params.id);
@@ -429,5 +548,21 @@ export async function handleCommitImport(req: Request, res: Response) {
     return res.json(report);
   } catch (error) {
     return sendError(res, error, "Failed to commit timetable import");
+  }
+}
+
+export async function handleGetProcessedImportRows(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    const report = await getTimetableImportProcessedRows(batchId);
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to fetch processed rows");
   }
 }

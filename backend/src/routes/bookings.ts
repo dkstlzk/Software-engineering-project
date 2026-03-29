@@ -10,7 +10,11 @@ import {
 import { eq, and, inArray, lt, gt } from "drizzle-orm";
 import { authMiddleware } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
-import { createBooking, createBookingsBulk } from "../services/bookingService";
+import {
+  createBooking,
+  createBookingsBulk,
+  updateBooking,
+} from "../services/bookingService";
 
 const router = Router();
 
@@ -193,6 +197,39 @@ router.post("/", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, re
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Insert failed" });
+  }
+});
+
+// -------------------------------------
+// PATCH /bookings/:id
+// Body: { roomId?, startAt?, endAt? }
+// -------------------------------------
+router.patch("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+
+    if (!Number.isInteger(bookingId) || bookingId <= 0) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+
+    const result = await updateBooking({
+      bookingId,
+      ...(req.body?.roomId !== undefined ? { roomId: Number(req.body.roomId) } : {}),
+      ...(req.body?.startAt !== undefined ? { startAt: req.body.startAt } : {}),
+      ...(req.body?.endAt !== undefined ? { endAt: req.body.endAt } : {}),
+    });
+
+    if (!result.ok) {
+      return res.status(result.status).json({
+        error: result.message,
+        code: result.code,
+      });
+    }
+
+    return res.json(result.booking);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: "Update failed" });
   }
 });
 

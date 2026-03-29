@@ -207,6 +207,10 @@ router.post("/:id/approve", authMiddleware, requireRole("STAFF"), async (req, re
           startAt: request.startAt,
           endAt: request.endAt,
           requestId: request.id,
+          metadata: {
+            source: "BOOKING_REQUEST",
+            sourceRef: `request:${request.id}`,
+          },
         },
         tx,
       );
