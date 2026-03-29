@@ -8,6 +8,7 @@ import {
 	handleListImportBatches,
 	handleGetImportBatch,
 	handleSaveImportDecisions,
+	handleTransferImportRow,
 	handleReallocateImport,
 	handleDeleteImportBatch,
 	handleGetProcessedImportRows,
@@ -62,6 +63,7 @@ router.get("/imports", handleListImportBatches);
 router.post("/imports/preview", upload.single("file"), handlePreviewImport);
 router.get("/imports/:id", handleGetImportBatch);
 router.put("/imports/:id/decisions", handleSaveImportDecisions);
+router.post("/imports/:id/rows/:rowId/transfer", handleTransferImportRow);
 router.post("/imports/:id/reallocate", handleReallocateImport);
 router.post("/imports/:id/commit", handleCommitImport);
 router.delete("/imports/:id", handleDeleteImportBatch);

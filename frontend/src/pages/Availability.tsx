@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
   getAvailability,
@@ -12,6 +12,10 @@ import {
   formatDateDDMMYYYY,
   formatDateTimeDDMMYYYY,
 } from "../utils/datetime";
+import type {
+  AvailabilityPrefill,
+  BookingRequestPrefill,
+} from "./bookingAvailabilityBridge";
 
 type SearchMode = "TIME" | "BUILDING_ROOM";
 
@@ -19,6 +23,13 @@ type RoomTimeBand = {
   startAt: string;
   endAt: string;
   isAvailable: boolean;
+};
+
+type AvailabilityPageProps = {
+  canRequestBooking?: boolean;
+  prefill?: AvailabilityPrefill | null;
+  onPrefillApplied?: () => void;
+  onRequestBooking?: (prefill: BookingRequestPrefill) => void;
 };
 
 function pad2(value: number): string {
@@ -147,7 +158,12 @@ function buildContinuousBands(
   }));
 }
 
-export function AvailabilityPage() {
+export function AvailabilityPage({
+  canRequestBooking = false,
+  prefill,
+  onPrefillApplied,
+  onRequestBooking,
+}: AvailabilityPageProps) {
   const [mode, setMode] = useState<SearchMode>("TIME");
 
   const [buildings, setBuildings] = useState<Building[]>([]);
@@ -173,6 +189,8 @@ export function AvailabilityPage() {
   const [roomEndTime, setRoomEndTime] = useState("18:00");
   const [roomBuildingId, setRoomBuildingId] = useState<number | "">("");
   const [roomId, setRoomId] = useState<number | "">("");
+
+  const [focusedRoomId, setFocusedRoomId] = useState<number | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -268,6 +286,64 @@ export function AvailabilityPage() {
     ));
   }, [groupedTimeResults]);
 
+  const runTimeSearch = useCallback(
+    async ({
+      startAt,
+      endAt,
+      buildingId,
+    }: {
+      startAt: string;
+      endAt: string;
+      buildingId?: number;
+    }) => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const data = await getAvailability(startAt, endAt, buildingId);
+
+        setTimeResults(data);
+        setRoomTimeBands(null);
+        setRoomSearchMeta(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to check availability");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!prefill) {
+      return;
+    }
+
+    const parsedStart = new Date(prefill.startAt).getTime();
+    const parsedEnd = new Date(prefill.endAt).getTime();
+
+    if (Number.isNaN(parsedStart) || Number.isNaN(parsedEnd) || parsedStart >= parsedEnd) {
+      setError("Invalid prefilled time range");
+      onPrefillApplied?.();
+      return;
+    }
+
+    setMode("TIME");
+    setTimeStartAt(prefill.startAt);
+    setTimeEndAt(prefill.endAt);
+    setTimeBuildingId(prefill.buildingId ?? "");
+    setShowOnlyAvailableRooms(false);
+    setFocusedRoomId(prefill.focusRoomId ?? null);
+
+    void runTimeSearch({
+      startAt: prefill.startAt,
+      endAt: prefill.endAt,
+      buildingId: prefill.buildingId,
+    });
+
+    onPrefillApplied?.();
+  }, [onPrefillApplied, prefill, runTimeSearch]);
+
   const handleTimeSearch = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
@@ -283,24 +359,13 @@ export function AvailabilityPage() {
       return;
     }
 
-    setLoading(true);
-    setError(null);
+    setFocusedRoomId(null);
 
-    try {
-      const data = await getAvailability(
-        timeStartAt,
-        timeEndAt,
-        timeBuildingId === "" ? undefined : timeBuildingId,
-      );
-
-      setTimeResults(data);
-      setRoomTimeBands(null);
-      setRoomSearchMeta(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to check availability");
-    } finally {
-      setLoading(false);
-    }
+    await runTimeSearch({
+      startAt: timeStartAt,
+      endAt: timeEndAt,
+      buildingId: timeBuildingId === "" ? undefined : timeBuildingId,
+    });
   };
 
   const handleRoomSearch = async (e: FormEvent<HTMLFormElement>) => {
@@ -345,6 +410,7 @@ export function AvailabilityPage() {
         endAt: windowEnd,
       });
       setTimeResults(null);
+      setFocusedRoomId(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to check room availability");
     } finally {
@@ -357,6 +423,14 @@ export function AvailabilityPage() {
 
   const availableTimeBands = roomTimeBands?.filter((band) => band.isAvailable).length ?? 0;
   const bookedTimeBands = (roomTimeBands?.length ?? 0) - availableTimeBands;
+
+  const selectedRoomId = typeof roomId === "number" ? roomId : null;
+  const selectedBuildingId = typeof roomBuildingId === "number" ? roomBuildingId : undefined;
+  const canRequestFromTimeResults = canRequestBooking && Boolean(onRequestBooking);
+  const canRequestFromBands =
+    canRequestBooking &&
+    Boolean(onRequestBooking) &&
+    selectedRoomId !== null;
 
   return (
     <section>
@@ -380,6 +454,7 @@ export function AvailabilityPage() {
             onClick={() => {
               setMode("TIME");
               setError(null);
+              setFocusedRoomId(null);
             }}
           >
             By Time
@@ -390,6 +465,7 @@ export function AvailabilityPage() {
             onClick={() => {
               setMode("BUILDING_ROOM");
               setError(null);
+              setFocusedRoomId(null);
             }}
           >
             By Building/Room
@@ -549,12 +625,28 @@ export function AvailabilityPage() {
                       {buildingGroup.rooms.map((room) => (
                         <div
                           key={`${buildingGroup.buildingId}-${room.id}`}
-                          className={`availability-chip ${room.isAvailable ? "is-available" : "is-booked"}`}
+                          className={`availability-chip ${room.isAvailable ? "is-available" : "is-booked"}${focusedRoomId === room.id ? " is-focused" : ""}`}
                         >
                           <span className="availability-chip-title">{room.name}</span>
                           <span className="availability-chip-status">
                             {room.isAvailable ? "Available" : "Booked"}
                           </span>
+                          {canRequestFromTimeResults && room.isAvailable && (
+                            <button
+                              type="button"
+                              className="availability-chip-action"
+                              onClick={() => {
+                                onRequestBooking?.({
+                                  roomId: room.id,
+                                  buildingId: buildingGroup.buildingId,
+                                  startAt: timeStartAt,
+                                  endAt: timeEndAt,
+                                });
+                              }}
+                            >
+                              Request
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -609,6 +701,22 @@ export function AvailabilityPage() {
                     <span className="availability-chip-status">
                       {band.isAvailable ? "Available" : "Booked"}
                     </span>
+                    {canRequestFromBands && band.isAvailable && (
+                      <button
+                        type="button"
+                        className="availability-chip-action"
+                        onClick={() => {
+                          onRequestBooking?.({
+                            roomId: selectedRoomId,
+                            buildingId: selectedBuildingId,
+                            startAt: band.startAt,
+                            endAt: band.endAt,
+                          });
+                        }}
+                      >
+                        Request
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>

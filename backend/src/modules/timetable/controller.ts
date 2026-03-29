@@ -26,6 +26,7 @@ import {
   previewTimetableImport,
   reallocateTimetableImport,
   saveTimetableImportDecisions,
+  transferTimetableImportRow,
 } from "./importService";
 
 function parsePositiveInteger(value: unknown): number | null {
@@ -494,6 +495,37 @@ export async function handleSaveImportDecisions(req: Request, res: Response) {
     return res.json(report);
   } catch (error) {
     return sendError(res, error, "Failed to save import decisions");
+  }
+}
+
+export async function handleTransferImportRow(req: Request, res: Response) {
+  try {
+    const sourceBatchId = parsePositiveInteger(req.params.id);
+    const rowId = parsePositiveInteger(req.params.rowId);
+    const targetSlotSystemId = parsePositiveInteger(req.body?.targetSlotSystemId);
+
+    if (!sourceBatchId) {
+      return res.status(400).json({ error: "Invalid source batch id" });
+    }
+
+    if (!rowId) {
+      return res.status(400).json({ error: "Invalid row id" });
+    }
+
+    if (!targetSlotSystemId) {
+      return res.status(400).json({ error: "Invalid targetSlotSystemId" });
+    }
+
+    const report = await transferTimetableImportRow({
+      sourceBatchId,
+      rowId,
+      targetSlotSystemId,
+      ...(req.user?.id !== undefined ? { createdBy: req.user.id } : {}),
+    });
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to transfer import row");
   }
 }
 

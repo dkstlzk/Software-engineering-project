@@ -6,6 +6,10 @@ import { BookingRequestsPage } from "./pages/BookingRequests";
 import { BookingsPage } from "./pages/Bookings";
 import { AvailabilityPage } from "./pages/Availability";
 import { TimetableBuilderPage } from "./pages/TimetableBuilder";
+import type {
+  AvailabilityPrefill,
+  BookingRequestPrefill,
+} from "./pages/bookingAvailabilityBridge";
 
 type PageKey = "rooms" | "bookingRequests" | "bookings" | "availability" | "timetableBuilder";
 
@@ -24,12 +28,47 @@ const NAV_ITEMS: NavEntry[] = [
   { key: "timetableBuilder", label: "Timetable Builder", icon: "🧩", roles: ["ADMIN"] },
 ];
 
-function PageRenderer({ page }: { page: PageKey }) {
+type PageRendererProps = {
+  page: PageKey;
+  canRequestBooking: boolean;
+  bookingRequestPrefill: BookingRequestPrefill | null;
+  availabilityPrefill: AvailabilityPrefill | null;
+  onBookingRequestPrefillConsumed: () => void;
+  onAvailabilityPrefillConsumed: () => void;
+  onRequestBookingFromAvailability: (prefill: BookingRequestPrefill) => void;
+  onCheckAvailabilityFromRequests: (prefill: AvailabilityPrefill) => void;
+};
+
+function PageRenderer({
+  page,
+  canRequestBooking,
+  bookingRequestPrefill,
+  availabilityPrefill,
+  onBookingRequestPrefillConsumed,
+  onAvailabilityPrefillConsumed,
+  onRequestBookingFromAvailability,
+  onCheckAvailabilityFromRequests,
+}: PageRendererProps) {
   switch (page) {
     case "rooms": return <RoomsPage />;
-    case "bookingRequests": return <BookingRequestsPage />;
+    case "bookingRequests":
+      return (
+        <BookingRequestsPage
+          prefill={bookingRequestPrefill}
+          onPrefillApplied={onBookingRequestPrefillConsumed}
+          onOpenAvailability={onCheckAvailabilityFromRequests}
+        />
+      );
     case "bookings": return <BookingsPage />;
-    case "availability": return <AvailabilityPage />;
+    case "availability":
+      return (
+        <AvailabilityPage
+          canRequestBooking={canRequestBooking}
+          prefill={availabilityPrefill}
+          onPrefillApplied={onAvailabilityPrefillConsumed}
+          onRequestBooking={onRequestBookingFromAvailability}
+        />
+      );
     case "timetableBuilder": return <TimetableBuilderPage />;
   }
 }
@@ -38,6 +77,8 @@ function App() {
   const { user, login, logout } = useAuth();
   const [activePage, setActivePage] = useState<PageKey>("rooms");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [bookingRequestPrefill, setBookingRequestPrefill] = useState<BookingRequestPrefill | null>(null);
+  const [availabilityPrefill, setAvailabilityPrefill] = useState<AvailabilityPrefill | null>(null);
 
   // Login state
   const [email, setEmail] = useState("");
@@ -121,6 +162,20 @@ function App() {
     .toUpperCase()
     .slice(0, 2);
 
+  const canRequestBooking = user.role === "STUDENT" || user.role === "FACULTY";
+
+  const handleRequestBookingFromAvailability = (prefill: BookingRequestPrefill) => {
+    setBookingRequestPrefill(prefill);
+    setActivePage("bookingRequests");
+    setSidebarOpen(false);
+  };
+
+  const handleCheckAvailabilityFromRequests = (prefill: AvailabilityPrefill) => {
+    setAvailabilityPrefill(prefill);
+    setActivePage("availability");
+    setSidebarOpen(false);
+  };
+
   return (
     <div className="app-layout">
       {/* Mobile toggle */}
@@ -179,7 +234,16 @@ function App() {
 
       {/* Page content */}
       <main className="main-area">
-        <PageRenderer page={activePage} />
+        <PageRenderer
+          page={activePage}
+          canRequestBooking={canRequestBooking}
+          bookingRequestPrefill={bookingRequestPrefill}
+          availabilityPrefill={availabilityPrefill}
+          onBookingRequestPrefillConsumed={() => setBookingRequestPrefill(null)}
+          onAvailabilityPrefillConsumed={() => setAvailabilityPrefill(null)}
+          onRequestBookingFromAvailability={handleRequestBookingFromAvailability}
+          onCheckAvailabilityFromRequests={handleCheckAvailabilityFromRequests}
+        />
       </main>
     </div>
   );

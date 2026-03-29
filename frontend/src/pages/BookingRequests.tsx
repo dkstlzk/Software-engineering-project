@@ -13,6 +13,10 @@ import type { BookingRequest, BookingStatus, Room } from "../api/api";
 import { useAuth } from "../auth/AuthContext";
 import { DateInput } from "../components/DateInput";
 import { formatDateTimeDDMMYYYY } from "../utils/datetime";
+import type {
+  AvailabilityPrefill,
+  BookingRequestPrefill,
+} from "./bookingAvailabilityBridge";
 
 type StatusFilter = "ALL" | BookingStatus;
 
@@ -44,7 +48,17 @@ function statusBadgeClass(status: BookingStatus): string {
   return `badge ${map[status]}`;
 }
 
-export function BookingRequestsPage() {
+type BookingRequestsPageProps = {
+  prefill?: BookingRequestPrefill | null;
+  onPrefillApplied?: () => void;
+  onOpenAvailability?: (prefill: AvailabilityPrefill) => void;
+};
+
+export function BookingRequestsPage({
+  prefill,
+  onPrefillApplied,
+  onOpenAvailability,
+}: BookingRequestsPageProps) {
   const { user } = useAuth();
   const currentRole = user?.role ?? null;
   const canCreate = currentRole === "STUDENT" || currentRole === "FACULTY";
@@ -62,6 +76,7 @@ export function BookingRequestsPage() {
   const [purpose, setPurpose] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [actingId, setActingId] = useState<number | null>(null);
+  const [prefillMessage, setPrefillMessage] = useState<string | null>(null);
 
   const roomNameById = new Map(rooms.map((r) => [r.id, r.name]));
 
@@ -89,6 +104,20 @@ export function BookingRequestsPage() {
     })();
   }, []);
 
+  useEffect(() => {
+    if (!prefill) {
+      return;
+    }
+
+    setRoomId(prefill.roomId);
+    setStartAt(prefill.startAt);
+    setEndAt(prefill.endAt);
+    setPurpose(prefill.purpose ?? "");
+    setError(null);
+    setPrefillMessage("Form prefilled from availability results.");
+    onPrefillApplied?.();
+  }, [onPrefillApplied, prefill]);
+
   const handleFilterChange = (value: StatusFilter) => {
     setStatusFilter(value);
     void loadRequests(value);
@@ -109,12 +138,44 @@ export function BookingRequestsPage() {
       setStartAt("");
       setEndAt("");
       setPurpose("");
+      setPrefillMessage(null);
       await loadRequests(statusFilter);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create request");
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleCheckAvailability = () => {
+    if (!onOpenAvailability) {
+      return;
+    }
+
+    if (roomId === "") {
+      setError("Room is required to check availability");
+      return;
+    }
+
+    if (!startAt || !endAt) {
+      setError("Start and end times are required to check availability");
+      return;
+    }
+
+    const parsedStart = new Date(startAt).getTime();
+    const parsedEnd = new Date(endAt).getTime();
+    if (Number.isNaN(parsedStart) || Number.isNaN(parsedEnd) || parsedStart >= parsedEnd) {
+      setError("Start must be earlier than end");
+      return;
+    }
+
+    const selectedRoom = rooms.find((room) => room.id === roomId);
+    onOpenAvailability({
+      startAt,
+      endAt,
+      buildingId: selectedRoom?.buildingId,
+      focusRoomId: roomId,
+    });
   };
 
   const runAction = async (id: number, action: () => Promise<void>) => {
@@ -208,14 +269,23 @@ export function BookingRequestsPage() {
               />
             </div>
           </div>
-          <div>
+          <div className="btn-group">
             <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
               {isSubmitting ? "Submitting…" : "Submit Request"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={isSubmitting}
+              onClick={handleCheckAvailability}
+            >
+              Check Availability
             </button>
           </div>
         </form>
       )}
 
+      {prefillMessage && <div className="alert alert-success">{prefillMessage}</div>}
       {error && <div className="alert alert-error">{error}</div>}
       {loading && <p className="loading-text">Loading requests…</p>}
       {!loading && requests.length === 0 && <p className="empty-text">No booking requests found.</p>}

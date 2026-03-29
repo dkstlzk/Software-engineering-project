@@ -812,6 +812,10 @@ button, input, select, textarea { font: inherit; }
   animation: fadeSlideIn var(--duration-normal) var(--ease-out) both;
 }
 
+.availability-chip.is-focused {
+  box-shadow: 0 0 0 2px var(--primary-400);
+}
+
 .availability-chip:hover {
   transform: translateY(-1px);
   box-shadow: var(--shadow-sm);
@@ -849,11 +853,35 @@ button, input, select, textarea { font: inherit; }
   text-transform: uppercase;
 }
 
+.availability-chip-action {
+  margin-top: var(--space-2);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: inherit;
+  padding: 2px 10px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.availability-chip-action:hover {
+  background: white;
+}
+
 .availability-chip-time {
   min-width: 110px;
   max-width: 110px;
   text-align: center;
   align-items: center;
+}
+
+.availability-chip-time .availability-chip-action {
+  align-self: center;
 }
 
 .availability-chip-time .availability-chip-title {
