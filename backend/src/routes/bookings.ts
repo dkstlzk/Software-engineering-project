@@ -15,6 +15,10 @@ import {
   createBookingsBulk,
   updateBooking,
 } from "../services/bookingService";
+import {
+  getAssignedBuildingIdsForStaff,
+  isRoomAssignedToStaff,
+} from "../services/staffBuildingScope";
 
 const router = Router();
 
@@ -22,20 +26,34 @@ router.get("/:id", authMiddleware, async (req, res) => {
   try {
     const id = Number(req.params.id);
 
-    if (isNaN(id)) {
+    if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "Invalid id" });
     }
 
     const result = await db
-      .select()
+      .select({
+        booking: bookings,
+        buildingId: rooms.buildingId,
+      })
       .from(bookings)
-      .where(eq(bookings.id, id));
+      .innerJoin(rooms, eq(bookings.roomId, rooms.id))
+      .where(eq(bookings.id, id))
+      .limit(1);
 
-    if (result.length === 0) {
+    const row = result[0];
+
+    if (!row) {
       return res.status(404).json({ error: "Booking not found" });
     }
 
-    return res.json(result[0]);
+    if (req.user?.role === "STAFF") {
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user.id);
+      if (!assignedBuildingIds.includes(row.buildingId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+    }
+
+    return res.json(row.booking);
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Fetch failed" });
@@ -87,9 +105,19 @@ router.get("/", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Invalid buildingId" });
     }
 
-    // ------------------------
-    // Build conditions
-    // ------------------------
+    const isStaff = req.user?.role === "STAFF";
+    const assignedBuildingIds = isStaff
+      ? await getAssignedBuildingIdsForStaff(req.user!.id)
+      : [];
+
+    if (isStaff && parsedBuildingId !== null && !assignedBuildingIds.includes(parsedBuildingId)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    if (isStaff && assignedBuildingIds.length === 0) {
+      return res.json([]);
+    }
+
     const conditions = [];
 
     if (parsedRoomId !== null) {
@@ -100,8 +128,8 @@ router.get("/", authMiddleware, async (req, res) => {
       conditions.push(
         and(
           lt(bookings.startAt, parsedEndAt),
-          gt(bookings.endAt, parsedStartAt)
-        )
+          gt(bookings.endAt, parsedStartAt),
+        ),
       );
     }
 
@@ -109,32 +137,25 @@ router.get("/", authMiddleware, async (req, res) => {
       conditions.push(eq(rooms.buildingId, parsedBuildingId));
     }
 
+    if (isStaff) {
+      conditions.push(inArray(rooms.buildingId, assignedBuildingIds));
+    }
+
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const shouldJoinRooms = parsedBuildingId !== null || isStaff;
 
-    // ------------------------
-    // Execute query (type-safe branches)
-    // ------------------------
-    let result;
-
-    if (parsedBuildingId !== null) {
+    if (shouldJoinRooms) {
       const query = db
-        .select()
+        .select({ booking: bookings })
         .from(bookings)
         .innerJoin(rooms, eq(bookings.roomId, rooms.id));
 
-      result = whereClause ? await query.where(whereClause) : await query;
-    } else {
-      const query = db.select().from(bookings);
-
-      result = whereClause ? await query.where(whereClause) : await query;
+      const result = whereClause ? await query.where(whereClause) : await query;
+      return res.json(result.map((row) => row.booking));
     }
 
-    if (parsedBuildingId !== null) {
-      // result is joined → extract bookings
-      const normalized = result.map((row: any) => row.bookings);
-      return res.json(normalized);
-    }
-
+    const query = db.select().from(bookings);
+    const result = whereClause ? await query.where(whereClause) : await query;
     return res.json(result);
 
   } catch (err) {
@@ -167,7 +188,75 @@ router.post(
         });
       }
 
-      const result = await createBookingsBulk(items);
+      if (req.user?.role === "STAFF") {
+        const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user.id);
+
+        if (assignedBuildingIds.length === 0) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+
+        const allowedBuildingIdSet = new Set(assignedBuildingIds);
+        const roomIds = Array.from(
+          new Set(
+            items
+              .map((item: any) => Number(item?.roomId))
+              .filter((roomId) => Number.isInteger(roomId) && roomId > 0),
+          ),
+        );
+
+        if (roomIds.length > 0) {
+          const roomRows = await db
+            .select({ id: rooms.id, buildingId: rooms.buildingId })
+            .from(rooms)
+            .where(inArray(rooms.id, roomIds));
+
+          const roomBuildingByRoomId = new Map(
+            roomRows.map((roomRow) => [roomRow.id, roomRow.buildingId]),
+          );
+
+          for (const roomId of roomIds) {
+            const buildingId = roomBuildingByRoomId.get(roomId);
+
+            if (
+              typeof buildingId === "number" &&
+              !allowedBuildingIdSet.has(buildingId)
+            ) {
+              return res.status(403).json({ error: "Forbidden" });
+            }
+          }
+        }
+      }
+
+      const stampedItems =
+        req.user?.id !== undefined
+          ? items.map((item: any) => {
+              if (!item || typeof item !== "object") {
+                return item;
+              }
+
+              const existingMetadata =
+                item.metadata && typeof item.metadata === "object"
+                  ? item.metadata
+                  : {};
+
+              return {
+                ...item,
+                metadata: {
+                  ...existingMetadata,
+                  approvedBy:
+                    existingMetadata.approvedBy !== undefined
+                      ? existingMetadata.approvedBy
+                      : req.user?.id,
+                  approvedAt:
+                    existingMetadata.approvedAt !== undefined
+                      ? existingMetadata.approvedAt
+                      : new Date(),
+                },
+              };
+            })
+          : items;
+
+      const result = await createBookingsBulk(stampedItems);
 
       return res.json(result);
     } catch (error) {
@@ -184,7 +273,40 @@ router.post(
 // -------------------------------------
 router.post("/", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
-    const result = await createBooking(req.body ?? {});
+    const input = req.body ?? {};
+
+    if (req.user?.role === "STAFF") {
+      const roomId = Number((input as any).roomId);
+
+      if (
+        Number.isInteger(roomId) &&
+        roomId > 0 &&
+        !(await isRoomAssignedToStaff(req.user.id, roomId))
+      ) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+    }
+
+    if (input && typeof input === "object" && req.user?.id !== undefined) {
+      const existingMetadata =
+        (input as any).metadata && typeof (input as any).metadata === "object"
+          ? (input as any).metadata
+          : {};
+
+      (input as any).metadata = {
+        ...existingMetadata,
+        approvedBy:
+          existingMetadata.approvedBy !== undefined
+            ? existingMetadata.approvedBy
+            : req.user.id,
+        approvedAt:
+          existingMetadata.approvedAt !== undefined
+            ? existingMetadata.approvedAt
+            : new Date(),
+      };
+    }
+
+    const result = await createBooking(input);
 
     if (!result.ok) {
       return res.status(result.status).json({
@@ -210,6 +332,43 @@ router.patch("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req
 
     if (!Number.isInteger(bookingId) || bookingId <= 0) {
       return res.status(400).json({ error: "Invalid id" });
+    }
+
+    if (req.user?.role === "STAFF") {
+      const existingRows = await db
+        .select({
+          id: bookings.id,
+          roomId: bookings.roomId,
+          buildingId: rooms.buildingId,
+        })
+        .from(bookings)
+        .innerJoin(rooms, eq(bookings.roomId, rooms.id))
+        .where(eq(bookings.id, bookingId))
+        .limit(1);
+
+      const existing = existingRows[0];
+
+      if (!existing) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user.id);
+
+      if (!assignedBuildingIds.includes(existing.buildingId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (req.body?.roomId !== undefined) {
+        const nextRoomId = Number(req.body.roomId);
+
+        if (
+          Number.isInteger(nextRoomId) &&
+          nextRoomId > 0 &&
+          !(await isRoomAssignedToStaff(req.user.id, nextRoomId))
+        ) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      }
     }
 
     const result = await updateBooking({
@@ -329,8 +488,32 @@ router.delete("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (re
   try {
     const id = Number(req.params.id);
 
-    if (isNaN(id)) {
+    if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "Invalid id" });
+    }
+
+    if (req.user?.role === "STAFF") {
+      const existingRows = await db
+        .select({
+          id: bookings.id,
+          buildingId: rooms.buildingId,
+        })
+        .from(bookings)
+        .innerJoin(rooms, eq(bookings.roomId, rooms.id))
+        .where(eq(bookings.id, id))
+        .limit(1);
+
+      const existing = existingRows[0];
+
+      if (!existing) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user.id);
+
+      if (!assignedBuildingIds.includes(existing.buildingId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
     }
 
     const deleted = await db

@@ -54,6 +54,7 @@ app.use("/booking-requests", bookingRequestsRouter);
 app.use('/availability', availabilityRoutes);
 app.use("/auth", authRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/users", usersRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/timetable", timetableRoutes);
 app.use("/api/timetable", timetableRoutes);

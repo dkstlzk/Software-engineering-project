@@ -14,11 +14,17 @@ const FORBIDDEN_SLOT_KEYS = [
   "dayId",
 ] as const;
 
-export type BookingSource = "MANUAL" | "BOOKING_REQUEST" | "TIMETABLE_IMPORT";
+export type BookingSource =
+  | "MANUAL_REQUEST"
+  | "TIMETABLE_ALLOCATION"
+  | "SLOT_CHANGE"
+  | "VENUE_CHANGE";
 
 export type BookingSourceMetadata = {
   source?: BookingSource;
   sourceRef?: string;
+  approvedBy?: number;
+  approvedAt?: string | Date;
 };
 
 export type CreateBookingInput = {
@@ -44,6 +50,8 @@ export type BookingCreateSuccess = {
     startAt: Date;
     endAt: Date;
     requestId: number | null;
+    approvedBy: number | null;
+    approvedAt: Date | null;
     source: BookingSource;
     sourceRef: string | null;
   };
@@ -66,6 +74,8 @@ export type BookingUpdateSuccess = {
     startAt: Date;
     endAt: Date;
     requestId: number | null;
+    approvedBy: number | null;
+    approvedAt: Date | null;
     source: BookingSource;
     sourceRef: string | null;
   };
@@ -185,13 +195,13 @@ function normalizeCreateInput(raw: CreateBookingInput | BulkBookingItemInput) {
   }
 
   const sourceRaw = (raw as CreateBookingInput).metadata?.source;
-  const source: BookingSource =
-    sourceRaw ?? (requestId !== null ? "BOOKING_REQUEST" : "MANUAL");
+  const source: BookingSource = sourceRaw ?? "MANUAL_REQUEST";
 
   if (
-    source !== "MANUAL" &&
-    source !== "BOOKING_REQUEST" &&
-    source !== "TIMETABLE_IMPORT"
+    source !== "MANUAL_REQUEST" &&
+    source !== "TIMETABLE_ALLOCATION" &&
+    source !== "SLOT_CHANGE" &&
+    source !== "VENUE_CHANGE"
   ) {
     throw createBookingServiceError(400, "INVALID_SOURCE", "Invalid booking source");
   }
@@ -202,11 +212,38 @@ function normalizeCreateInput(raw: CreateBookingInput | BulkBookingItemInput) {
       ? sourceRefRaw.trim()
       : null;
 
+  const approvedByRaw = (raw as CreateBookingInput).metadata?.approvedBy;
+  const approvedBy =
+    approvedByRaw === undefined || approvedByRaw === null
+      ? null
+      : Number(approvedByRaw);
+
+  if (
+    approvedBy !== null &&
+    (!Number.isInteger(approvedBy) || approvedBy <= 0)
+  ) {
+    throw createBookingServiceError(400, "INVALID_APPROVER", "Invalid approvedBy");
+  }
+
+  const approvedAtRaw = (raw as CreateBookingInput).metadata?.approvedAt;
+  const approvedAtCandidate =
+    approvedAtRaw === undefined || approvedAtRaw === null || approvedAtRaw === ""
+      ? null
+      : new Date(approvedAtRaw as string | Date);
+
+  if (approvedAtCandidate !== null && Number.isNaN(approvedAtCandidate.getTime())) {
+    throw createBookingServiceError(400, "INVALID_APPROVED_AT", "Invalid approvedAt");
+  }
+
+  const approvedAt = approvedBy !== null ? approvedAtCandidate ?? new Date() : null;
+
   return {
     roomId: parsedRoomId,
     startAt,
     endAt,
     requestId,
+    approvedBy,
+    approvedAt,
     source,
     sourceRef,
   };
@@ -282,6 +319,8 @@ export async function createBooking(
         startAt: input.startAt,
         endAt: input.endAt,
         requestId: input.requestId,
+        approvedBy: input.approvedBy,
+        approvedAt: input.approvedAt,
         source: input.source,
         sourceRef: input.sourceRef,
       })

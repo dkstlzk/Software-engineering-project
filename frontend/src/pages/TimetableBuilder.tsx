@@ -48,6 +48,7 @@ import type {
   TimetableImportPreviewReport,
   TimetableImportSavedDecision,
 } from "../api/api";
+import { useAuth } from "../auth/AuthContext";
 import { formatDateDDMMYYYY } from "../utils/datetime";
 import { DateInput } from "../components/DateInput";
 
@@ -290,7 +291,66 @@ function toDateOnlyInputValue(value: string): string {
   return `${year}-${month}-${day}`;
 }
 
+function toDecisionComparisonSignature(
+  decision: TimetableImportCommitDecision | null,
+): string {
+  if (!decision) {
+    return "__MISSING__";
+  }
+
+  return JSON.stringify({
+    action: decision.action,
+    resolvedSlotLabel: decision.resolvedSlotLabel?.trim() ?? null,
+    resolvedRoomId: decision.resolvedRoomId ?? null,
+    createSlot: decision.createSlot ?? null,
+    createRoom: decision.createRoom ?? null,
+  });
+}
+
+function toConflictWindowRange(startAt: string, endAt: string): string {
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return `${startAt} - ${endAt}`;
+  }
+
+  return `${start.toLocaleString()} - ${end.toLocaleString()}`;
+}
+
+function showConflictingBookingsPopup(
+  report: TimetableImportCommitReport,
+  operationLabel: string,
+) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const conflicts = Array.isArray(report.conflictingBookings)
+    ? report.conflictingBookings
+    : [];
+
+  if (conflicts.length === 0) {
+    return;
+  }
+
+  const lines = conflicts.map(
+    (conflict, index) =>
+      `${index + 1}. Row ${conflict.rowIndex} · ${toConflictWindowRange(
+        conflict.startAt,
+        conflict.endAt,
+      )}\n   ${conflict.message}`,
+  );
+
+  window.alert(
+    `${operationLabel} found ${conflicts.length} conflicting booking(s):\n\n${lines.join("\n\n")}`,
+  );
+}
+
 export function TimetableBuilderPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "ADMIN";
+
   const [slotSystems, setSlotSystems] = useState<SlotSystem[]>([]);
   const [selectedSystemId, setSelectedSystemId] = useState<number | "">("");
   const [grid, setGrid] = useState<SlotFullGrid | null>(null);
@@ -805,7 +865,7 @@ export function TimetableBuilderPage() {
         startAt: draft.startAt,
         endAt: draft.endAt,
         metadata: {
-          source: "TIMETABLE_IMPORT",
+          source: "TIMETABLE_ALLOCATION",
           sourceRef: `batch:${batchId}:row:${rowId}:manual-create`,
         },
       });
@@ -1498,6 +1558,42 @@ export function TimetableBuilderPage() {
     );
   };
 
+  const buildChangedImportDecisionsPayload = (): TimetableImportCommitDecision[] => {
+    if (!previewReport) {
+      return [];
+    }
+
+    const savedDecisionByRowId = new Map<number, TimetableImportSavedDecision>(
+      previewReport.savedDecisions.map((decision) => [decision.rowId, decision]),
+    );
+
+    const changedDecisions: TimetableImportCommitDecision[] = [];
+
+    for (const row of previewReport.rows) {
+      const currentState = rowDecisions[row.rowId] ?? createDecisionForPreviewRow(row);
+      const currentPayload = buildRowDecisionPayload(row.rowId, currentState);
+
+      if (!currentPayload) {
+        continue;
+      }
+
+      const savedDecision = savedDecisionByRowId.get(row.rowId);
+      const baselineState = savedDecision
+        ? applySavedDecisionToRow(row, savedDecision)
+        : createDecisionForPreviewRow(row);
+      const baselinePayload = buildRowDecisionPayload(row.rowId, baselineState);
+
+      if (
+        toDecisionComparisonSignature(currentPayload) !==
+        toDecisionComparisonSignature(baselinePayload)
+      ) {
+        changedDecisions.push(currentPayload);
+      }
+    }
+
+    return changedDecisions;
+  };
+
   const handleCreateResolveSlot = async (
     rowId: number,
     rowIndex: number,
@@ -1642,10 +1738,16 @@ export function TimetableBuilderPage() {
     setImportInfo(null);
 
     try {
-      const decisions = buildImportDecisionsPayload();
+      const decisions = buildChangedImportDecisionsPayload();
+
+      if (decisions.length === 0) {
+        setImportInfo("No changed rows detected, so reallocation was skipped.");
+        return;
+      }
 
       const report = await apiReallocateTimetableImport(previewReport.batchId, decisions);
       setCommitReport(report);
+      showConflictingBookingsPopup(report, "Reallocation");
 
       const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
       hydratePreviewFromBatch(refreshedReport);
@@ -1730,6 +1832,7 @@ export function TimetableBuilderPage() {
 
       const report = await apiCommitTimetableImport(previewReport.batchId, decisions);
       setCommitReport(report);
+  showConflictingBookingsPopup(report, "Commit");
 
       const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
       hydratePreviewFromBatch(refreshedReport);
@@ -2584,6 +2687,12 @@ export function TimetableBuilderPage() {
                               {occurrence.errorMessage && (
                                 <div className="alert alert-error" style={{ marginTop: "var(--space-2)" }}>
                                   {occurrence.errorMessage}
+                                </div>
+                              )}
+
+                              {isAdmin && occurrence.booking && (
+                                <div className="empty-text" style={{ marginTop: "var(--space-2)" }}>
+                                  Source: {occurrence.booking.source.replace(/_/g, " ")} · Source Ref: {occurrence.booking.sourceRef ?? "-"} · Request Link: {occurrence.booking.requestId ?? "-"} · Approved By: {occurrence.booking.approvedBy ?? "-"} · Approved At: {occurrence.booking.approvedAt ?? "-"}
                                 </div>
                               )}
 

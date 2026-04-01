@@ -5,6 +5,7 @@ import {
   deleteBooking,
   getBookings,
   getBuildings,
+  getManagedUsers,
   getRooms,
 } from "../api/api";
 import type { Booking, Building, Room } from "../api/api";
@@ -14,11 +15,13 @@ import { formatDateTimeDDMMYYYY } from "../utils/datetime";
 
 export function BookingsPage() {
   const { user } = useAuth();
+  const isAdmin = user?.role === "ADMIN";
   const canMutate = user?.role === "ADMIN" || user?.role === "STAFF";
 
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
+  const [adminUserNameById, setAdminUserNameById] = useState<Record<number, string>>({});
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +40,28 @@ export function BookingsPage() {
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const roomNameById = new Map(rooms.map((r) => [r.id, r.name]));
+
+  const bookingSourceLabel = (source: Booking["source"]) => source.replace(/_/g, " ");
+
+  const loadAdminUsers = async () => {
+    if (!isAdmin) {
+      setAdminUserNameById({});
+      return;
+    }
+
+    try {
+      const response = await getManagedUsers({ page: 1, limit: 100 });
+      const nextNameMap: Record<number, string> = {};
+
+      for (const managedUser of response.data) {
+        nextNameMap[managedUser.id] = managedUser.displayName ?? managedUser.name;
+      }
+
+      setAdminUserNameById(nextNameMap);
+    } catch {
+      setAdminUserNameById({});
+    }
+  };
 
   const loadBookings = async () => {
     setLoading(true);
@@ -68,6 +93,11 @@ export function BookingsPage() {
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    void loadAdminUsers();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
 
   const handleFilter = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -231,6 +261,12 @@ export function BookingsPage() {
         <div className="data-list">
           {bookings.map((b) => {
             const isDeleting = deletingId === b.id;
+            const approvedByLabel =
+              b.approvedBy === null
+                ? "-"
+                : (adminUserNameById[b.approvedBy] ?? `User ${b.approvedBy}`);
+            const requestLabel = b.requestId === null ? "-" : String(b.requestId);
+
             return (
               <div className="data-item" key={b.id}>
                 <div className="data-item-content">
@@ -241,6 +277,11 @@ export function BookingsPage() {
                   <div className="data-item-subtitle">
                     {roomNameById.get(b.roomId) ?? `Room #${b.roomId}`} · {formatDateTimeDDMMYYYY(b.startAt)} – {formatDateTimeDDMMYYYY(b.endAt)}
                   </div>
+                  {isAdmin && (
+                    <div className="empty-text" style={{ marginTop: "var(--space-1)" }}>
+                      Source: {bookingSourceLabel(b.source)} · Source Ref: {b.sourceRef ?? "-"} · Request Link: {requestLabel} · Approved By: {approvedByLabel} · Approved At: {b.approvedAt ? formatDateTimeDDMMYYYY(b.approvedAt) : "-"}
+                    </div>
+                  )}
                 </div>
                 {canMutate && (
                   <div className="data-item-actions">

@@ -127,6 +127,27 @@
       "when": 1775194647301,
       "tag": "0017_pending_role_for_oauth",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1775209730745,
+      "tag": "0018_booking_request_event_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1775211596028,
+      "tag": "0019_flaky_tana_nile",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1775213802823,
+      "tag": "0020_staff_building_assignments",
+      "breakpoints": true
     }
   ]
 }

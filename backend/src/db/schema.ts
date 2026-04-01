@@ -45,9 +45,10 @@ export const rooms = pgTable(
 );
 
 export const bookingSourceEnum = pgEnum("booking_source", [
-  "MANUAL",
-  "BOOKING_REQUEST",
-  "TIMETABLE_IMPORT",
+  "MANUAL_REQUEST",
+  "TIMETABLE_ALLOCATION",
+  "SLOT_CHANGE",
+  "VENUE_CHANGE",
 ]);
 
 export const bookings = pgTable("bookings", {
@@ -65,7 +66,13 @@ export const bookings = pgTable("bookings", {
     onDelete: "set null",
   }),
 
-  source: bookingSourceEnum("source").notNull().default("MANUAL"),
+  approvedBy: integer("approved_by").references(() => users.id, {
+    onDelete: "set null",
+  }),
+
+  approvedAt: timestamp("approved_at", { withTimezone: false }),
+
+  source: bookingSourceEnum("source").notNull().default("MANUAL_REQUEST"),
 
   sourceRef: text("source_ref"),
 });
@@ -242,7 +249,7 @@ export const timetableImportOccurrences = pgTable(
     startAt: timestamp("start_at", { withTimezone: false }).notNull(),
     endAt: timestamp("end_at", { withTimezone: false }).notNull(),
 
-    source: text("source").notNull().default("TIMETABLE_IMPORT"),
+    source: text("source").notNull().default("TIMETABLE_ALLOCATION"),
     sourceRef: text("source_ref"),
 
     dedupeKey: text("dedupe_key").notNull(),
@@ -327,6 +334,17 @@ export const bookingStatusEnum = pgEnum("booking_status", [
   "CANCELLED",
 ]);
 
+export const bookingEventTypeEnum = pgEnum("booking_event_type", [
+  "QUIZ",
+  "SEMINAR",
+  "SPEAKER_SESSION",
+  "MEETING",
+  "CULTURAL_EVENT",
+  "WORKSHOP",
+  "CLASS",
+  "OTHER",
+]);
+
 export const bookingRequests = pgTable(
   "booking_requests",
   {
@@ -347,7 +365,11 @@ export const bookingRequests = pgTable(
     startAt: timestamp("start_at").notNull(),
     endAt: timestamp("end_at").notNull(),
 
+    eventType: bookingEventTypeEnum("event_type").notNull().default("OTHER"),
+
     purpose: text("purpose").notNull(),
+
+    participantCount: integer("participant_count"),
 
     status: bookingStatusEnum("status").notNull().default("PENDING_FACULTY"),
 
@@ -358,6 +380,10 @@ export const bookingRequests = pgTable(
     facultyIdIdx: index("booking_requests_faculty_id_idx").on(table.facultyId),
     roomIdIdx: index("booking_requests_room_id_idx").on(table.roomId),
     statusIdx: index("booking_requests_status_idx").on(table.status),
+    participantCountPositiveCheck: check(
+      "booking_requests_participant_count_positive_check",
+      sql`${table.participantCount} IS NULL OR ${table.participantCount} > 0`,
+    ),
   }),
 );
 
@@ -412,6 +438,36 @@ export const users = pgTable(
     googleDomainCheck: check(
       "users_google_email_domain_check",
       sql`${table.registeredVia} <> 'google' OR lower(${table.email}) LIKE '%@iitj.ac.in'`,
+    ),
+  }),
+);
+
+export const staffBuildingAssignments = pgTable(
+  "staff_building_assignments",
+  {
+    staffId: integer("staff_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    buildingId: integer("building_id")
+      .notNull()
+      .references(() => buildings.id, { onDelete: "cascade" }),
+    assignedBy: integer("assigned_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    assignedAt: timestamp("assigned_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    staffBuildingUnique: uniqueIndex(
+      "staff_building_assignments_staff_building_unique",
+    ).on(table.staffId, table.buildingId),
+    staffIdIdx: index("staff_building_assignments_staff_id_idx").on(table.staffId),
+    buildingIdIdx: index("staff_building_assignments_building_id_idx").on(
+      table.buildingId,
+    ),
+    assignedByIdx: index("staff_building_assignments_assigned_by_idx").on(
+      table.assignedBy,
     ),
   }),
 );

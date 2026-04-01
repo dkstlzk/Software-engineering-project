@@ -1,20 +1,22 @@
 import { Router, Request, Response } from "express";
+import { and, asc, eq, gt, inArray, lt } from "drizzle-orm";
 import { db } from "../db";
-import { rooms , buildings ,bookings} from "../db/schema";
-import { and, asc, eq, gt, lt } from 'drizzle-orm';
+import { buildings, bookings, rooms } from "../db/schema";
 import { authMiddleware } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
+import {
+  getAssignedBuildingIdsForStaff,
+  isBuildingAssignedToStaff,
+  isRoomAssignedToStaff,
+} from "../services/staffBuildingScope";
 
 const router = Router();
 
-// GET /rooms/:id
 router.get("/:id", authMiddleware, async (req, res) => {
   try {
-    const idParam = req.params.id;
-    const roomId = Number(idParam);
+    const roomId = Number(req.params.id);
 
-    // Validate
-    if (Number.isNaN(roomId)) {
+    if (!Number.isInteger(roomId) || roomId <= 0) {
       return res.status(400).json({ error: "Invalid room id" });
     }
 
@@ -28,29 +30,39 @@ router.get("/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Room not found" });
     }
 
-    res.json(result[0]);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch room" });
+    if (
+      req.user?.role === "STAFF" &&
+      !(await isBuildingAssignedToStaff(req.user.id, result[0].buildingId))
+    ) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    return res.json(result[0]);
+  } catch {
+    return res.status(500).json({ error: "Failed to fetch room" });
   }
 });
 
-//GET rooms with optional buildingId filter
 router.get("/", authMiddleware, async (req, res) => {
   try {
     const buildingId = req.query.buildingId;
 
-    // If buildingId is provided
     if (buildingId !== undefined) {
       const parsedId = Number(buildingId);
 
-      // Validate number
-      if (Number.isNaN(parsedId)) {
+      if (!Number.isInteger(parsedId) || parsedId <= 0) {
         return res.status(400).json({ error: "Invalid buildingId" });
       }
 
-      // Step 1: Check if building exists
+      if (
+        req.user?.role === "STAFF" &&
+        !(await isBuildingAssignedToStaff(req.user.id, parsedId))
+      ) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
       const building = await db
-        .select()
+        .select({ id: buildings.id })
         .from(buildings)
         .where(eq(buildings.id, parsedId))
         .limit(1);
@@ -59,7 +71,6 @@ router.get("/", authMiddleware, async (req, res) => {
         return res.status(404).json({ error: "Building not found" });
       }
 
-      // Step 2: Fetch rooms
       const result = await db
         .select()
         .from(rooms)
@@ -68,26 +79,40 @@ router.get("/", authMiddleware, async (req, res) => {
       return res.json(result);
     }
 
-    // No filter → return all rooms
+    if (req.user?.role === "STAFF") {
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user.id);
+
+      if (assignedBuildingIds.length === 0) {
+        return res.json([]);
+      }
+
+      const result = await db
+        .select()
+        .from(rooms)
+        .where(inArray(rooms.buildingId, assignedBuildingIds));
+
+      return res.json(result);
+    }
+
     const result = await db.select().from(rooms);
-    res.json(result);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch rooms" });
+    return res.json(result);
+  } catch {
+    return res.status(500).json({ error: "Failed to fetch rooms" });
   }
 });
 
-router.get('/:id/availability', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+router.get("/:id/availability", authMiddleware, async (req: Request, res: Response): Promise<void> => {
   const roomId = Number(req.params.id);
   const startAtRaw = req.query.startAt;
   const endAtRaw = req.query.endAt;
 
   if (!Number.isInteger(roomId) || roomId <= 0) {
-    res.status(400).json({ message: 'Invalid roomId' });
+    res.status(400).json({ message: "Invalid roomId" });
     return;
   }
 
-  if (typeof startAtRaw !== 'string' || typeof endAtRaw !== 'string') {
-    res.status(400).json({ message: 'startAt and endAt are required' });
+  if (typeof startAtRaw !== "string" || typeof endAtRaw !== "string") {
+    res.status(400).json({ message: "startAt and endAt are required" });
     return;
   }
 
@@ -95,7 +120,7 @@ router.get('/:id/availability', authMiddleware, async (req: Request, res: Respon
   const endAt = new Date(endAtRaw);
 
   if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime()) || startAt >= endAt) {
-    res.status(400).json({ message: 'Invalid startAt or endAt' });
+    res.status(400).json({ message: "Invalid startAt or endAt" });
     return;
   }
 
@@ -109,7 +134,15 @@ router.get('/:id/availability', authMiddleware, async (req: Request, res: Respon
       .limit(1);
 
     if (roomRows.length === 0) {
-      res.status(404).json({ message: 'Room not found' });
+      res.status(404).json({ message: "Room not found" });
+      return;
+    }
+
+    if (
+      req.user?.role === "STAFF" &&
+      !(await isRoomAssignedToStaff(req.user.id, roomId))
+    ) {
+      res.status(403).json({ message: "Forbidden" });
       return;
     }
 
@@ -124,39 +157,42 @@ router.get('/:id/availability', authMiddleware, async (req: Request, res: Respon
         and(
           eq(bookings.roomId, roomId),
           lt(bookings.startAt, endAt),
-          gt(bookings.endAt, startAt)
-        )
+          gt(bookings.endAt, startAt),
+        ),
       )
       .orderBy(asc(bookings.startAt));
 
     res.json(overlappingBookings);
   } catch (error) {
-    console.error('GET /rooms/:id/availability error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error("GET /rooms/:id/availability error:", error);
+    res.status(500).json({ message: "Server error" });
   }
 });
 
-//POST room 
 router.post("/", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
     const name = req.body?.name?.trim();
     const buildingIdRaw = req.body?.buildingId;
 
-    // Validate name
     if (!name) {
       return res.status(400).json({ error: "Name is required" });
     }
 
-    // Validate buildingId presence
     if (buildingIdRaw === undefined) {
       return res.status(400).json({ error: "buildingId is required" });
     }
 
-    // Convert + validate number
     const buildingId = Number(buildingIdRaw);
 
-    if (Number.isNaN(buildingId)) {
+    if (!Number.isInteger(buildingId) || buildingId <= 0) {
       return res.status(400).json({ error: "Invalid buildingId" });
+    }
+
+    if (
+      req.user?.role === "STAFF" &&
+      !(await isBuildingAssignedToStaff(req.user.id, buildingId))
+    ) {
+      return res.status(403).json({ error: "Forbidden" });
     }
 
     const result = await db
@@ -164,7 +200,7 @@ router.post("/", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, re
       .values({ name, buildingId })
       .returning();
 
-    res.json(result[0]);
+    return res.json(result[0]);
   } catch (error: any) {
     if (error?.cause?.code === "23505") {
       return res.status(409).json({ error: "Room already exists in this building" });
@@ -174,52 +210,71 @@ router.post("/", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, re
       return res.status(400).json({ error: "Invalid buildingId" });
     }
 
-    res.status(500).json({ error: "Insert failed" });
+    return res.status(500).json({ error: "Insert failed" });
   }
 });
 
-// DELETE /rooms/:id
 router.delete("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
-    const idParam = req.params.id;
-    const roomId = Number(idParam);
+    const roomId = Number(req.params.id);
 
-    // Validate
-    if (Number.isNaN(roomId)) {
+    if (!Number.isInteger(roomId) || roomId <= 0) {
       return res.status(400).json({ error: "Invalid room id" });
     }
 
-    const result = await db
-      .delete(rooms)
+    const existing = await db
+      .select({ id: rooms.id, buildingId: rooms.buildingId })
+      .from(rooms)
       .where(eq(rooms.id, roomId))
-      .returning();
+      .limit(1);
 
-    // Not found
-    if (result.length === 0) {
+    if (existing.length === 0) {
       return res.status(404).json({ error: "Room not found" });
     }
 
-    res.json({ message: "Room deleted" });
-  } catch (error) {
-    res.status(500).json({ error: "Delete failed" });
+    if (
+      req.user?.role === "STAFF" &&
+      !(await isBuildingAssignedToStaff(req.user.id, existing[0].buildingId))
+    ) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    await db.delete(rooms).where(eq(rooms.id, roomId));
+
+    return res.json({ message: "Room deleted" });
+  } catch {
+    return res.status(500).json({ error: "Delete failed" });
   }
 });
 
-// PATCH /rooms/:id
 router.patch("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req, res) => {
   try {
-    const idParam = req.params.id;
-    const roomId = Number(idParam);
+    const roomId = Number(req.params.id);
     const name = req.body?.name?.trim();
 
-    // Validate ID
-    if (Number.isNaN(roomId)) {
+    if (!Number.isInteger(roomId) || roomId <= 0) {
       return res.status(400).json({ error: "Invalid room id" });
     }
 
-    // Validate name
     if (!name) {
       return res.status(400).json({ error: "Name is required" });
+    }
+
+    const existing = await db
+      .select({ id: rooms.id, buildingId: rooms.buildingId })
+      .from(rooms)
+      .where(eq(rooms.id, roomId))
+      .limit(1);
+
+    if (existing.length === 0) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
+    if (
+      req.user?.role === "STAFF" &&
+      !(await isBuildingAssignedToStaff(req.user.id, existing[0].buildingId))
+    ) {
+      return res.status(403).json({ error: "Forbidden" });
     }
 
     const result = await db
@@ -228,28 +283,20 @@ router.patch("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req
       .where(eq(rooms.id, roomId))
       .returning();
 
-    // Not found
-    if (result.length === 0) {
-      return res.status(404).json({ error: "Room not found" });
-    }
-
-    res.json({
+    return res.json({
       message: "Room updated",
       data: result[0],
     });
   } catch (error: any) {
     console.error(error);
 
-    const pgError = error?.cause;
-
-    // 🔥 This now matches your composite unique constraint
-    if (pgError?.code === "23505") {
+    if (error?.cause?.code === "23505") {
       return res.status(409).json({
         error: "Room with this name already exists in the building",
       });
     }
 
-    res.status(500).json({ error: "Update failed" });
+    return res.status(500).json({ error: "Update failed" });
   }
 });
 

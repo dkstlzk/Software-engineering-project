@@ -114,16 +114,34 @@ if (isGoogleOAuthConfigured) {
             .limit(1);
 
           if (byEmail[0]) {
-            if (byEmail[0].googleId === null) {
+            const matchedUser = byEmail[0];
+
+            if (matchedUser.registeredVia !== "google") {
               return done(null, false, {
                 message:
                   "Email is already registered with password login. Use email/password.",
               });
             }
 
-            return done(null, false, {
-              message: "Account conflict for this Google email",
-            });
+            if (matchedUser.googleId !== null && matchedUser.googleId !== googleId) {
+              return done(null, false, {
+                message: "Account conflict for this Google email",
+              });
+            }
+
+            const [linked] = await db
+              .update(users)
+              .set({
+                googleId,
+                avatarUrl,
+                displayName,
+                name: displayName,
+                registeredVia: "google",
+              })
+              .where(eq(users.id, matchedUser.id))
+              .returning();
+
+            return done(null, linked ?? matchedUser);
           }
 
           const generatedPasswordHash = await bcrypt.hash(
@@ -137,7 +155,7 @@ if (isGoogleOAuthConfigured) {
               name: displayName,
               email,
               passwordHash: generatedPasswordHash,
-              role: "PENDING_ROLE",
+              role: "STUDENT",
               googleId,
               avatarUrl,
               displayName,

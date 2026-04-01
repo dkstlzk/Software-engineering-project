@@ -2,7 +2,7 @@ import { type Request, type Response, Router } from "express";
 import bcrypt from "bcrypt";
 import { eq } from "drizzle-orm";
 import passport from "../auth/passport";
-import { signAuthToken, signSetupToken, verifySetupToken } from "../auth/jwt";
+import { signAuthToken, verifySetupToken } from "../auth/jwt";
 import { env, isGoogleOAuthConfigured } from "../config/env";
 import { db } from "../db";
 import { users } from "../db/schema";
@@ -214,25 +214,40 @@ if (isGoogleOAuthConfigured) {
             return res.redirect(failedRedirect);
           }
 
+          let effectiveUser = user;
+
+          if (effectiveUser.role === "PENDING_ROLE") {
+            const [updated] = await db
+              .update(users)
+              .set({
+                role: "STUDENT",
+                firstLogin: true,
+              })
+              .where(eq(users.id, effectiveUser.id))
+              .returning();
+
+            if (updated) {
+              effectiveUser = updated;
+            }
+          }
+
           let redirectUrl: string;
 
-          if (user.role === "PENDING_ROLE") {
-            const setupToken = signSetupToken(user.id);
-            redirectUrl = buildFrontendUrl("/auth/setup", { token: setupToken });
-          } else if (user.firstLogin) {
-            const token = signAuthToken({ id: user.id, role: user.role });
+          if (effectiveUser.firstLogin) {
+            const token = signAuthToken({ id: effectiveUser.id, role: effectiveUser.role });
 
             await db
               .update(users)
               .set({ firstLogin: false })
-              .where(eq(users.id, user.id));
+              .where(eq(users.id, effectiveUser.id));
 
             redirectUrl = buildFrontendUrl("/auth/callback", {
               token,
               firstLogin: "true",
+              role: effectiveUser.role,
             });
           } else {
-            const token = signAuthToken({ id: user.id, role: user.role });
+            const token = signAuthToken({ id: effectiveUser.id, role: effectiveUser.role });
             redirectUrl = buildFrontendUrl("/auth/callback", { token });
           }
 

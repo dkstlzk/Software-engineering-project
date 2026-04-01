@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { db } from "../db";
-import { eq, lt, gt, and, or } from "drizzle-orm";
-import { bookingRequests } from "../db/schema";
+import { eq, lt, gt, and, or, isNull, inArray } from "drizzle-orm";
+import { bookingRequests, users, rooms } from "../db/schema";
 import { authMiddleware } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { createBooking, hasBookingOverlap } from "../services/bookingService";
+import { getAssignedBuildingIdsForStaff } from "../services/staffBuildingScope";
 
 const router = Router();
 
@@ -16,16 +17,50 @@ const ALL_STATUSES = [
   "CANCELLED",
 ] as const;
 
+const ALL_EVENT_TYPES = [
+  "QUIZ",
+  "SEMINAR",
+  "SPEAKER_SESSION",
+  "MEETING",
+  "CULTURAL_EVENT",
+  "WORKSHOP",
+  "CLASS",
+  "OTHER",
+] as const;
+
 type BookingRequestStatus = (typeof ALL_STATUSES)[number];
+type BookingEventType = (typeof ALL_EVENT_TYPES)[number];
+
+async function getRequestWithBuilding(requestId: number) {
+  const rows = await db
+    .select({
+      request: bookingRequests,
+      buildingId: rooms.buildingId,
+    })
+    .from(bookingRequests)
+    .innerJoin(rooms, eq(bookingRequests.roomId, rooms.id))
+    .where(eq(bookingRequests.id, requestId))
+    .limit(1);
+
+  return rows[0] ?? null;
+}
 
 function isBookingRequestStatus(value: unknown): value is BookingRequestStatus {
   return typeof value === "string" && (ALL_STATUSES as readonly string[]).includes(value);
 }
 
+function isBookingEventType(value: unknown): value is BookingEventType {
+  return typeof value === "string" && (ALL_EVENT_TYPES as readonly string[]).includes(value);
+}
+
 function canViewRequest(
   role: "ADMIN" | "STAFF" | "FACULTY" | "STUDENT",
   userId: number,
-  request: { userId: number | null; status: BookingRequestStatus }
+  request: {
+    userId: number | null;
+    facultyId: number | null;
+    status: BookingRequestStatus;
+  }
 ) {
   if (role === "ADMIN") {
     return true;
@@ -36,7 +71,11 @@ function canViewRequest(
   }
 
   if (role === "FACULTY") {
-    return request.userId === userId || request.status === "PENDING_FACULTY";
+    return (
+      request.userId === userId ||
+      request.facultyId === userId ||
+      (request.facultyId === null && request.status === "PENDING_FACULTY")
+    );
   }
 
   if (role === "STAFF") {
@@ -59,12 +98,9 @@ router.get("/:id", authMiddleware, async (req, res) => {
   }
 
   try {
-    const rows = await db
-      .select()
-      .from(bookingRequests)
-      .where(eq(bookingRequests.id, id));
+    const row = await getRequestWithBuilding(id);
 
-    const [bookingRequest] = rows;
+    const bookingRequest = row?.request;
 
     if (!bookingRequest) {
       return res.status(404).json({ error: "Request not found" });
@@ -72,6 +108,17 @@ router.get("/:id", authMiddleware, async (req, res) => {
 
     if (!canViewRequest(req.user!.role, req.user!.id, bookingRequest)) {
       return res.status(403).json({ error: "Forbidden" });
+    }
+
+    if (req.user!.role === "STAFF") {
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user!.id);
+
+      if (
+        assignedBuildingIds.length === 0 ||
+        !assignedBuildingIds.includes(row!.buildingId)
+      ) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
     }
 
     return res.json(bookingRequest);
@@ -97,6 +144,31 @@ router.get("/", authMiddleware, async (req, res) => {
     const role = req.user!.role;
     const userId = req.user!.id;
 
+    if (role === "STAFF") {
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(userId);
+
+      if (assignedBuildingIds.length === 0) {
+        return res.json([]);
+      }
+
+      const conditions = [
+        eq(bookingRequests.status, "PENDING_STAFF"),
+        inArray(rooms.buildingId, assignedBuildingIds),
+      ];
+
+      if (status) {
+        conditions.push(eq(bookingRequests.status, status));
+      }
+
+      const requests = await db
+        .select({ request: bookingRequests })
+        .from(bookingRequests)
+        .innerJoin(rooms, eq(bookingRequests.roomId, rooms.id))
+        .where(and(...conditions));
+
+      return res.json(requests.map((row) => row.request));
+    }
+
     let visibilityCondition;
 
     if (role === "ADMIN") {
@@ -106,10 +178,14 @@ router.get("/", authMiddleware, async (req, res) => {
     } else if (role === "FACULTY") {
       visibilityCondition = or(
         eq(bookingRequests.userId, userId),
-        eq(bookingRequests.status, "PENDING_FACULTY")
+        eq(bookingRequests.facultyId, userId),
+        and(
+          eq(bookingRequests.status, "PENDING_FACULTY"),
+          isNull(bookingRequests.facultyId)
+        )
       );
     } else {
-      visibilityCondition = eq(bookingRequests.status, "PENDING_STAFF");
+      return res.status(403).json({ error: "Forbidden" });
     }
 
     const statusCondition = status
@@ -140,12 +216,9 @@ router.post("/:id/reject", authMiddleware, requireRole(["FACULTY", "STAFF"]), as
   }
 
   try {
-    const rows = await db
-      .select()
-      .from(bookingRequests)
-      .where(eq(bookingRequests.id, id));
+    const row = await getRequestWithBuilding(id);
 
-    const request = rows[0];
+    const request = row?.request;
 
     if (!request) {
       return res.status(404).json({ error: "Request not found" });
@@ -161,6 +234,25 @@ router.post("/:id/reject", authMiddleware, requireRole(["FACULTY", "STAFF"]), as
       return res.status(400).json({
         error: "Invalid status for rejection",
       });
+    }
+
+    if (
+      role === "FACULTY" &&
+      request.facultyId !== null &&
+      request.facultyId !== req.user!.id
+    ) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    if (role === "STAFF") {
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user!.id);
+
+      if (
+        assignedBuildingIds.length === 0 ||
+        !assignedBuildingIds.includes(row!.buildingId)
+      ) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
     }
 
     const updated = await db
@@ -185,6 +277,21 @@ router.post("/:id/approve", authMiddleware, requireRole("STAFF"), async (req, re
   }
 
   try {
+    const scopeRow = await getRequestWithBuilding(id);
+
+    if (!scopeRow) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+
+    const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user!.id);
+
+    if (
+      assignedBuildingIds.length === 0 ||
+      !assignedBuildingIds.includes(scopeRow.buildingId)
+    ) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
     const booking = await db.transaction(async (tx) => {
       const rows = await tx
         .select()
@@ -208,8 +315,14 @@ router.post("/:id/approve", authMiddleware, requireRole("STAFF"), async (req, re
           endAt: request.endAt,
           requestId: request.id,
           metadata: {
-            source: "BOOKING_REQUEST",
+            source: "MANUAL_REQUEST",
             sourceRef: `request:${request.id}`,
+            ...(req.user?.id !== undefined
+              ? {
+                  approvedBy: req.user.id,
+                  approvedAt: new Date(),
+                }
+              : {}),
           },
         },
         tx,
@@ -302,6 +415,13 @@ router.post("/:id/forward", authMiddleware, requireRole("FACULTY"), async (req, 
       });
     }
 
+    if (
+      request.facultyId !== null &&
+      request.facultyId !== req.user!.id
+    ) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
     // Update status
     const updated = await db
       .update(bookingRequests)
@@ -377,7 +497,10 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
     const roomId = Number(req.body?.roomId);
     const startAt = req.body?.startAt;
     const endAt = req.body?.endAt;
+    const eventTypeRaw = req.body?.eventType;
     const purpose = req.body?.purpose?.trim();
+    const participantCountRaw = req.body?.participantCount;
+    const selectedFacultyId = Number(req.body?.facultyId);
 
     // Validation
     if (isNaN(roomId)) {
@@ -392,6 +515,32 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
       return res.status(400).json({ error: "Purpose is required" });
     }
 
+    let eventType: BookingEventType = "OTHER";
+
+    if (eventTypeRaw !== undefined && eventTypeRaw !== null && eventTypeRaw !== "") {
+      if (!isBookingEventType(eventTypeRaw)) {
+        return res.status(400).json({ error: "Invalid eventType" });
+      }
+
+      eventType = eventTypeRaw;
+    }
+
+    let participantCount: number | null = null;
+
+    if (
+      participantCountRaw !== undefined &&
+      participantCountRaw !== null &&
+      String(participantCountRaw).trim() !== ""
+    ) {
+      const parsedParticipantCount = Number(participantCountRaw);
+
+      if (!Number.isInteger(parsedParticipantCount) || parsedParticipantCount <= 0) {
+        return res.status(400).json({ error: "participantCount must be a positive integer" });
+      }
+
+      participantCount = parsedParticipantCount;
+    }
+
     const start = new Date(startAt);
     const end = new Date(endAt);
 
@@ -401,6 +550,34 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
 
     if (start >= end) {
       return res.status(400).json({ error: "startAt must be before endAt" });
+    }
+
+    let facultyId: number | null = null;
+
+    if (req.user!.role === "STUDENT") {
+      if (!Number.isInteger(selectedFacultyId) || selectedFacultyId <= 0) {
+        return res.status(400).json({ error: "facultyId is required for student requests" });
+      }
+
+      const facultyRows = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            eq(users.id, selectedFacultyId),
+            eq(users.role, "FACULTY"),
+            eq(users.isActive, true)
+          )
+        )
+        .limit(1);
+
+      if (!facultyRows[0]) {
+        return res.status(400).json({ error: "Selected faculty is invalid" });
+      }
+
+      facultyId = selectedFacultyId;
+    } else {
+      facultyId = req.user!.id;
     }
 
     /**
@@ -453,10 +630,13 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
       .insert(bookingRequests)
       .values({
         userId: req.user!.id,
+        facultyId,
         roomId,
         startAt: start,
         endAt: end,
+        eventType,
         purpose,
+        participantCount,
         status: req.user!.role === "STUDENT" ? "PENDING_FACULTY" : "PENDING_STAFF",
       })
       .returning();

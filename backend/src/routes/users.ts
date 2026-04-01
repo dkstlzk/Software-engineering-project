@@ -5,6 +5,7 @@ import {
   asc,
   desc,
   eq,
+  inArray,
   ilike,
   or,
   sql,
@@ -13,11 +14,13 @@ import {
 import { authMiddleware } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { db } from "../db";
-import { users } from "../db/schema";
+import { buildings, staffBuildingAssignments, users } from "../db/schema";
 
 type UserRole = "ADMIN" | "STAFF" | "FACULTY" | "STUDENT" | "PENDING_ROLE";
 
 type AssignableRole = "ADMIN" | "STAFF" | "FACULTY" | "STUDENT";
+
+type CreateAuthProvider = "email" | "google";
 
 const FILTERABLE_ROLES: UserRole[] = [
   "ADMIN",
@@ -32,6 +35,17 @@ const ASSIGNABLE_ROLES: AssignableRole[] = [
   "STAFF",
   "FACULTY",
   "STUDENT",
+];
+
+const GOOGLE_PROVISIONABLE_ROLES: Array<"ADMIN" | "STAFF" | "FACULTY"> = [
+  "ADMIN",
+  "STAFF",
+  "FACULTY",
+];
+
+const EMAIL_PROVISIONABLE_ROLES: Array<"ADMIN" | "STAFF"> = [
+  "ADMIN",
+  "STAFF",
 ];
 
 const router = Router();
@@ -70,6 +84,28 @@ function parseBoolean(input: unknown): boolean | "invalid" | undefined {
   }
 
   return "invalid";
+}
+
+function parseBuildingIds(input: unknown): number[] | "invalid" {
+  if (!Array.isArray(input)) {
+    return "invalid";
+  }
+
+  const parsed = input.map((value) => Number(value));
+
+  if (parsed.some((value) => !Number.isInteger(value) || value <= 0)) {
+    return "invalid";
+  }
+
+  return Array.from(new Set(parsed));
+}
+
+function isMissingAssignmentsTableError(error: unknown): boolean {
+  const cause = (error as { cause?: { code?: string; message?: string } })?.cause;
+  const message =
+    (cause?.message ?? (error as { message?: string })?.message ?? "").toLowerCase();
+
+  return cause?.code === "42P01" && message.includes("staff_building_assignments");
 }
 
 async function getActiveAdminCount(): Promise<number> {
@@ -222,8 +258,54 @@ router.get("/", async (req, res) => {
       ? await dataQuery.where(whereClause)
       : await dataQuery;
 
+    const userIds = data.map((row) => row.id);
+
+    let assignmentRows: Array<{
+      staffId: number;
+      buildingId: number;
+      buildingName: string;
+    }> = [];
+
+    if (userIds.length > 0) {
+      try {
+        assignmentRows = await db
+          .select({
+            staffId: staffBuildingAssignments.staffId,
+            buildingId: buildings.id,
+            buildingName: buildings.name,
+          })
+          .from(staffBuildingAssignments)
+          .innerJoin(
+            buildings,
+            eq(staffBuildingAssignments.buildingId, buildings.id),
+          )
+          .where(inArray(staffBuildingAssignments.staffId, userIds))
+          .orderBy(asc(buildings.name));
+      } catch (error) {
+        if (!isMissingAssignmentsTableError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    const assignedBuildingByStaffId = new Map<number, Array<{ id: number; name: string }>>();
+
+    for (const assignment of assignmentRows) {
+      const existing = assignedBuildingByStaffId.get(assignment.staffId) ?? [];
+      existing.push({ id: assignment.buildingId, name: assignment.buildingName });
+      assignedBuildingByStaffId.set(assignment.staffId, existing);
+    }
+
+    const dataWithAssignments = data.map((row) => ({
+      ...row,
+      assignedBuildings:
+        row.role === "STAFF"
+          ? assignedBuildingByStaffId.get(row.id) ?? []
+          : [],
+    }));
+
     return res.json({
-      data,
+      data: dataWithAssignments,
       pagination: {
         page,
         limit,
@@ -244,39 +326,58 @@ router.post("/", async (req, res) => {
     const rawPassword = req.body?.password;
     const rawRole = req.body?.role;
     const rawDepartment = req.body?.department;
+    const rawAuthProvider = req.body?.authProvider;
 
     if (
-      typeof rawName !== "string" ||
       typeof rawEmail !== "string" ||
-      typeof rawPassword !== "string" ||
       typeof rawRole !== "string"
     ) {
       return res.status(400).json({
-        error: "name, email, password and role are required",
+        error: "email and role are required",
       });
     }
 
-    const name = rawName.trim();
+    if (
+      rawAuthProvider !== undefined &&
+      rawAuthProvider !== "email" &&
+      rawAuthProvider !== "google"
+    ) {
+      return res.status(400).json({
+        error: "authProvider must be email or google when provided",
+      });
+    }
+
+    const authProvider: CreateAuthProvider =
+      rawAuthProvider === "google" ? "google" : "email";
+
     const email = rawEmail.trim().toLowerCase();
-    const password = rawPassword;
 
-    if (!name || !email || !password) {
+    if (!email) {
       return res.status(400).json({
-        error: "name, email and password cannot be empty",
+        error: "email cannot be empty",
       });
     }
 
-    if (password.length < 8) {
+    let name: string;
+
+    if (typeof rawName === "string" && rawName.trim().length > 0) {
+      name = rawName.trim();
+    } else if (authProvider === "google") {
+      const [localPart] = email.split("@");
+      name = localPart || "Google User";
+    } else {
       return res.status(400).json({
-        error: "password must be at least 8 characters",
+        error: "name is required for email/password accounts",
       });
     }
 
-    if (rawRole !== "ADMIN" && rawRole !== "STAFF") {
+    if (!name) {
       return res.status(400).json({
-        error: "Only ADMIN or STAFF can be created via this endpoint",
+        error: "name cannot be empty",
       });
     }
+
+    const requestedRole = rawRole as AssignableRole;
 
     if (rawDepartment !== undefined && typeof rawDepartment !== "string") {
       return res.status(400).json({
@@ -289,6 +390,38 @@ router.post("/", async (req, res) => {
         ? rawDepartment.trim()
         : null;
 
+    let passwordHash: string;
+
+    if (authProvider === "email") {
+      if (!EMAIL_PROVISIONABLE_ROLES.includes(requestedRole as "ADMIN" | "STAFF")) {
+        return res.status(400).json({
+          error: "Only ADMIN or STAFF can be created with email/password",
+        });
+      }
+
+      if (typeof rawPassword !== "string" || rawPassword.length < 8) {
+        return res.status(400).json({
+          error: "password must be at least 8 characters",
+        });
+      }
+
+      passwordHash = await bcrypt.hash(rawPassword, 10);
+    } else {
+      if (!GOOGLE_PROVISIONABLE_ROLES.includes(requestedRole as "ADMIN" | "STAFF" | "FACULTY")) {
+        return res.status(400).json({
+          error: "Google-provisioned accounts can only be ADMIN, STAFF or FACULTY",
+        });
+      }
+
+      if (!email.endsWith("@iitj.ac.in")) {
+        return res.status(400).json({
+          error: "Google-provisioned users must use @iitj.ac.in email",
+        });
+      }
+
+      passwordHash = await bcrypt.hash(`google_provisioned_${email}_${Date.now()}`, 10);
+    }
+
     const existing = await db
       .select({ id: users.id })
       .from(users)
@@ -299,22 +432,20 @@ router.post("/", async (req, res) => {
       return res.status(409).json({ error: "Email already exists" });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
-
     const inserted = await db
       .insert(users)
       .values({
         name,
         email,
         passwordHash,
-        role: rawRole,
+        role: requestedRole,
         googleId: null,
         avatarUrl: null,
         displayName: null,
         department,
         isActive: true,
-        registeredVia: "email",
-        firstLogin: false,
+        registeredVia: authProvider,
+        firstLogin: authProvider === "google",
       })
       .returning({
         id: users.id,
@@ -323,6 +454,7 @@ router.post("/", async (req, res) => {
         role: users.role,
         department: users.department,
         isActive: users.isActive,
+        registeredVia: users.registeredVia,
       });
 
     return res.status(201).json(inserted[0]);
@@ -380,22 +512,188 @@ router.patch("/:id/role", async (req, res) => {
       }
     }
 
-    const updated = await db
-      .update(users)
-      .set({ role: requestedRole as AssignableRole })
-      .where(eq(users.id, targetId))
-      .returning({
-        id: users.id,
-        name: users.name,
-        email: users.email,
-        role: users.role,
-        isActive: users.isActive,
-      });
+    const updated = await db.transaction(async (tx) => {
+      const updatedRows = await tx
+        .update(users)
+        .set({ role: requestedRole as AssignableRole })
+        .where(eq(users.id, targetId))
+        .returning({
+          id: users.id,
+          name: users.name,
+          email: users.email,
+          role: users.role,
+          isActive: users.isActive,
+        });
 
-    return res.json(updated[0]);
+      if (requestedRole !== "STAFF") {
+        try {
+          await tx
+            .delete(staffBuildingAssignments)
+            .where(eq(staffBuildingAssignments.staffId, targetId));
+        } catch (error) {
+          if (!isMissingAssignmentsTableError(error)) {
+            throw error;
+          }
+        }
+      }
+
+      return updatedRows[0];
+    });
+
+    return res.json(updated);
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Failed to update role" });
+  }
+});
+router.get("/:id/building-assignments", async (req, res) => {
+  try {
+    const targetId = Number(req.params.id);
+
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+
+    const targetRows = await db
+      .select({ id: users.id, role: users.role })
+      .from(users)
+      .where(eq(users.id, targetId))
+      .limit(1);
+
+    const target = targetRows[0];
+
+    if (!target) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (target.role !== "STAFF") {
+      return res.json({ userId: targetId, buildingIds: [], buildings: [] });
+    }
+
+    const assignedRows = await db
+      .select({
+        buildingId: buildings.id,
+        buildingName: buildings.name,
+      })
+      .from(staffBuildingAssignments)
+      .innerJoin(
+        buildings,
+        eq(staffBuildingAssignments.buildingId, buildings.id),
+      )
+      .where(eq(staffBuildingAssignments.staffId, targetId))
+      .orderBy(asc(buildings.name));
+
+    return res.json({
+      userId: targetId,
+      buildingIds: assignedRows.map((row) => row.buildingId),
+      buildings: assignedRows.map((row) => ({
+        id: row.buildingId,
+        name: row.buildingName,
+      })),
+    });
+  } catch (error) {
+    if (isMissingAssignmentsTableError(error)) {
+      return res.status(503).json({
+        error: "Staff building assignments are unavailable until database migrations are applied",
+      });
+    }
+
+    console.error(error);
+    return res.status(500).json({ error: "Failed to fetch building assignments" });
+  }
+});
+
+router.put("/:id/building-assignments", async (req, res) => {
+  try {
+    const targetId = Number(req.params.id);
+
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+
+    const parsedBuildingIds = parseBuildingIds(req.body?.buildingIds);
+
+    if (parsedBuildingIds === "invalid") {
+      return res.status(400).json({ error: "buildingIds must be an array of positive integers" });
+    }
+
+    const targetRows = await db
+      .select({ id: users.id, role: users.role })
+      .from(users)
+      .where(eq(users.id, targetId))
+      .limit(1);
+
+    const target = targetRows[0];
+
+    if (!target) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (target.role !== "STAFF") {
+      return res.status(400).json({ error: "Assignments are allowed only for STAFF users" });
+    }
+
+    if (parsedBuildingIds.length > 0) {
+      const existingBuildingRows = await db
+        .select({ id: buildings.id })
+        .from(buildings)
+        .where(inArray(buildings.id, parsedBuildingIds));
+
+      if (existingBuildingRows.length !== parsedBuildingIds.length) {
+        return res.status(400).json({ error: "One or more buildingIds are invalid" });
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      await tx
+        .delete(staffBuildingAssignments)
+        .where(eq(staffBuildingAssignments.staffId, targetId));
+
+      if (parsedBuildingIds.length > 0) {
+        await tx
+          .insert(staffBuildingAssignments)
+          .values(
+            parsedBuildingIds.map((buildingId) => ({
+              staffId: targetId,
+              buildingId,
+              assignedBy: req.user?.id ?? null,
+            })),
+          );
+      }
+    });
+
+    const assignedRows = parsedBuildingIds.length
+      ? await db
+          .select({
+            buildingId: buildings.id,
+            buildingName: buildings.name,
+          })
+          .from(staffBuildingAssignments)
+          .innerJoin(
+            buildings,
+            eq(staffBuildingAssignments.buildingId, buildings.id),
+          )
+          .where(eq(staffBuildingAssignments.staffId, targetId))
+          .orderBy(asc(buildings.name))
+      : [];
+
+    return res.json({
+      userId: targetId,
+      buildingIds: assignedRows.map((row) => row.buildingId),
+      buildings: assignedRows.map((row) => ({
+        id: row.buildingId,
+        name: row.buildingName,
+      })),
+    });
+  } catch (error) {
+    if (isMissingAssignmentsTableError(error)) {
+      return res.status(503).json({
+        error: "Staff building assignments are unavailable until database migrations are applied",
+      });
+    }
+
+    console.error(error);
+    return res.status(500).json({ error: "Failed to update building assignments" });
   }
 });
 

@@ -104,6 +104,7 @@ function DeleteIcon() {
 export function RoomsPage() {
   const { user } = useAuth();
   const canMutate = user?.role === "ADMIN" || user?.role === "STAFF";
+  const canCreateBuilding = user?.role === "ADMIN";
 
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -371,7 +372,7 @@ export function RoomsPage() {
           <h3>Buildings</h3>
         </div>
 
-        {canMutate && (
+        {canCreateBuilding && (
           <form className="section-gap" onSubmit={handleCreateBuilding}>
             <div className="icon-input-row">
               <div className="form-field">

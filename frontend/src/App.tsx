@@ -1,18 +1,24 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { SetupRole } from "./api/api";
 import { useAuth } from "./auth/AuthContext";
 import { RoomsPage } from "./pages/Rooms";
 import { BookingRequestsPage } from "./pages/BookingRequests";
 import { BookingsPage } from "./pages/Bookings";
 import { AvailabilityPage } from "./pages/Availability";
 import { TimetableBuilderPage } from "./pages/TimetableBuilder";
+import { UsersPage } from "./pages/Users";
 import type {
   AvailabilityPrefill,
   BookingRequestPrefill,
 } from "./pages/bookingAvailabilityBridge";
 
-type PageKey = "rooms" | "bookingRequests" | "bookings" | "availability" | "timetableBuilder";
+type PageKey =
+  | "rooms"
+  | "bookingRequests"
+  | "bookings"
+  | "availability"
+  | "timetableBuilder"
+  | "users";
 
 type NavEntry = {
   key: PageKey;
@@ -23,6 +29,7 @@ type NavEntry = {
 
 const NAV_ITEMS: NavEntry[] = [
   { key: "rooms", label: "Rooms", icon: "🚪" },
+  { key: "users", label: "Users", icon: "👥", roles: ["ADMIN"] },
   { key: "bookingRequests", label: "Requests", icon: "📋" },
   { key: "bookings", label: "Bookings", icon: "📅", roles: ["ADMIN", "STAFF"] },
   { key: "availability", label: "Availability", icon: "🔍" },
@@ -52,6 +59,7 @@ function PageRenderer({
 }: PageRendererProps) {
   switch (page) {
     case "rooms": return <RoomsPage />;
+    case "users": return <UsersPage />;
     case "bookingRequests":
       return (
         <BookingRequestsPage
@@ -75,7 +83,7 @@ function PageRenderer({
 }
 
 function App() {
-  const { user, login, loginWithGoogle, loginWithToken, completeSetup, logout } = useAuth();
+  const { user, login, loginWithGoogle, loginWithToken, logout } = useAuth();
   const [activePage, setActivePage] = useState<PageKey>("rooms");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [bookingRequestPrefill, setBookingRequestPrefill] = useState<BookingRequestPrefill | null>(null);
@@ -87,14 +95,12 @@ function App() {
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
-  const [setupRole, setSetupRole] = useState<SetupRole>("STUDENT");
-  const [setupDepartment, setSetupDepartment] = useState("");
-  const [setupLoading, setSetupLoading] = useState(false);
 
   const pathname = window.location.pathname;
   const searchParams = new URLSearchParams(window.location.search);
   const routeToken = searchParams.get("token");
   const routeError = searchParams.get("error");
+  const firstLoginRole = searchParams.get("role");
   const isOAuthCallbackPath = pathname === "/auth/callback";
   const isOAuthSetupPath = pathname === "/auth/setup";
   const isOAuthFailed = routeError === "oauth_failed";
@@ -130,7 +136,13 @@ function App() {
         }
 
         if (isFirstLoginCallback) {
-          setAuthNotice("Welcome! Please review your profile and preferences.");
+          if (firstLoginRole === "STUDENT") {
+            setAuthNotice("Signed in with Google as STUDENT. Contact admin for FACULTY or STAFF access.");
+          } else if (firstLoginRole === "FACULTY" || firstLoginRole === "STAFF" || firstLoginRole === "ADMIN") {
+            setAuthNotice(`Welcome! Your ${firstLoginRole} access is enabled.`);
+          } else {
+            setAuthNotice("Welcome! Google sign-in completed.");
+          }
         }
 
         window.history.replaceState({}, "", "/");
@@ -151,7 +163,7 @@ function App() {
     return () => {
       isCancelled = true;
     };
-  }, [user, isOAuthCallbackPath, routeToken, isFirstLoginCallback, loginWithToken]);
+  }, [user, isOAuthCallbackPath, routeToken, isFirstLoginCallback, firstLoginRole, loginWithToken]);
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -184,35 +196,6 @@ function App() {
     }
   };
 
-  const handleCompleteSetup = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    if (!routeToken) {
-      setAuthError("Missing setup token");
-      return;
-    }
-
-    setSetupLoading(true);
-    setAuthError(null);
-
-    try {
-      const trimmedDepartment = setupDepartment.trim();
-
-      await completeSetup(
-        routeToken,
-        setupRole,
-        trimmedDepartment.length > 0 ? trimmedDepartment : undefined,
-      );
-
-      setAuthNotice("Account setup complete. You are now signed in.");
-      window.history.replaceState({}, "", "/");
-    } catch (e) {
-      setAuthError(e instanceof Error ? e.message : "Failed to complete setup");
-    } finally {
-      setSetupLoading(false);
-    }
-  };
-
   // ——— Login screen ———
   if (!user) {
     if (isOAuthCallbackPath) {
@@ -236,49 +219,15 @@ function App() {
     if (isOAuthSetupPath) {
       return (
         <div className="login-page">
-          <form className="login-card" onSubmit={handleCompleteSetup}>
-            <h1>Complete Account Setup</h1>
-            <p className="subtitle">Choose your role to finish Google sign-in</p>
-
-            <div className="form-grid">
-              <div className="form-field">
-                <label htmlFor="setupRole">Role</label>
-                <select
-                  id="setupRole"
-                  className="input"
-                  value={setupRole}
-                  onChange={(e) => setSetupRole(e.target.value as SetupRole)}
-                  disabled={setupLoading}
-                >
-                  <option value="STUDENT">STUDENT</option>
-                  <option value="FACULTY">FACULTY</option>
-                </select>
-              </div>
-
-              <div className="form-field">
-                <label htmlFor="setupDepartment">Department (optional)</label>
-                <input
-                  id="setupDepartment"
-                  className="input"
-                  type="text"
-                  value={setupDepartment}
-                  onChange={(e) => setSetupDepartment(e.target.value)}
-                  placeholder="Computer Science"
-                  disabled={setupLoading}
-                />
-              </div>
+          <div className="login-card">
+            <h1>Google Setup Updated</h1>
+            <p className="subtitle">
+              Role selection during Google setup is disabled. New Google users are granted STUDENT access by default.
+            </p>
+            <div className="alert alert-success" style={{ marginTop: "var(--space-4)" }}>
+              Contact admin if you need FACULTY or STAFF access.
             </div>
-
-            <button type="submit" className="btn btn-primary" disabled={setupLoading}>
-              {setupLoading ? "Finishing setup…" : "Complete Setup"}
-            </button>
-
-            {authError && (
-              <div className="alert alert-error" style={{ marginTop: "var(--space-4)" }}>
-                {authError}
-              </div>
-            )}
-          </form>
+          </div>
         </div>
       );
     }

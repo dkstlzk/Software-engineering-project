@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
-import { and, asc, eq, gt, lt, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, lt, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { buildings, rooms, bookings } from '../db/schema';
 import { authMiddleware } from "../middleware/auth";
+import { getAssignedBuildingIdsForStaff } from "../services/staffBuildingScope";
 
 const router = Router();
 
@@ -48,6 +49,33 @@ router.get('/', authMiddleware, async (req: Request, res: Response): Promise<voi
   }
 
   try {
+    const isStaff = req.user?.role === "STAFF";
+    const assignedBuildingIds = isStaff
+      ? await getAssignedBuildingIdsForStaff(req.user!.id)
+      : [];
+
+    if (isStaff && buildingId !== null && !assignedBuildingIds.includes(buildingId)) {
+      res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
+
+    if (isStaff && assignedBuildingIds.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    const conditions = [];
+
+    if (buildingId !== null) {
+      conditions.push(eq(rooms.buildingId, buildingId));
+    }
+
+    if (isStaff) {
+      conditions.push(inArray(rooms.buildingId, assignedBuildingIds));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
     const rows = await db
       .select({
         buildingId: buildings.id,
@@ -66,7 +94,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response): Promise<voi
           gt(bookings.endAt, startAt)
         )
       )
-      .where(buildingId !== null ? eq(rooms.buildingId, buildingId) : undefined)
+      .where(whereClause)
       .groupBy(buildings.id, buildings.name, rooms.id, rooms.name)
       .orderBy(asc(buildings.name), asc(rooms.name));
 

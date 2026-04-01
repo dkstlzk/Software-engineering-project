@@ -170,6 +170,16 @@ type CommitRowSummary = {
   bookingConflictReasons: string[];
 };
 
+type CommitConflictItem = {
+  rowId: number;
+  rowIndex: number;
+  occurrenceId: number;
+  roomId: number;
+  startAt: string;
+  endAt: string;
+  message: string;
+};
+
 type CommitReport = {
   batchId: number;
   status: "COMMITTED" | "ALREADY_COMMITTED";
@@ -181,6 +191,7 @@ type CommitReport = {
   skippedRows: number;
   bookingConflictRows: number;
   bookingConflictOccurrences: number;
+  conflictingBookings: CommitConflictItem[];
   rowResults: CommitRowSummary[];
   warnings: string[];
 };
@@ -205,7 +216,11 @@ type ProcessedOccurrenceReport = {
     startAt: string;
     endAt: string;
     requestId: number | null;
-    source: "MANUAL" | "BOOKING_REQUEST" | "TIMETABLE_IMPORT";
+    source:
+      | "MANUAL_REQUEST"
+      | "TIMETABLE_ALLOCATION"
+      | "SLOT_CHANGE"
+      | "VENUE_CHANGE";
     sourceRef: string | null;
   } | null;
 };
@@ -318,6 +333,22 @@ function isBookingConflictMessage(message: string | null | undefined): boolean {
   }
 
   return normalizeKey(message).includes("already booked");
+}
+
+function toSavedDecisionSignature(decision: SavedDecisionSnapshot | undefined): string {
+  if (!decision) {
+    return "__MISSING__";
+  }
+
+  return JSON.stringify({
+    action: decision.action,
+    resolvedSlotLabel: decision.resolvedSlotLabel
+      ? normalizeSpace(decision.resolvedSlotLabel)
+      : null,
+    resolvedRoomId: decision.resolvedRoomId ?? null,
+    createSlot: decision.createSlot ?? null,
+    createRoom: decision.createRoom ?? null,
+  });
 }
 
 function toDecisionSnapshot(row: {
@@ -2241,7 +2272,7 @@ async function getBatchLinkedBookingIds(batchId: number): Promise<number[]> {
       .from(bookings)
       .where(
         and(
-          eq(bookings.source, "TIMETABLE_IMPORT"),
+          eq(bookings.source, "TIMETABLE_ALLOCATION"),
           like(bookings.sourceRef, `batch:${batchId}:%`),
         ),
       ),
@@ -2262,8 +2293,100 @@ async function getBatchLinkedBookingIds(batchId: number): Promise<number[]> {
   return Array.from(ids);
 }
 
-async function resetBatchForReallocation(batchId: number): Promise<{ deletedBookings: number }> {
-  const bookingIds = await getBatchLinkedBookingIds(batchId);
+function parseRowIdFromSourceRef(sourceRef: string | null | undefined): number | null {
+  if (!sourceRef) {
+    return null;
+  }
+
+  const match = sourceRef.match(/^batch:\d+:row:(\d+):/);
+
+  if (!match) {
+    return null;
+  }
+
+  const parsedRowId = Number(match[1]);
+
+  if (!Number.isInteger(parsedRowId) || parsedRowId <= 0) {
+    return null;
+  }
+
+  return parsedRowId;
+}
+
+async function getBatchLinkedBookingIdsForRows(
+  batchId: number,
+  rowIds: number[],
+): Promise<number[]> {
+  const uniqueRowIds = Array.from(
+    new Set(rowIds.filter((rowId) => Number.isInteger(rowId) && rowId > 0)),
+  );
+
+  if (uniqueRowIds.length === 0) {
+    return [];
+  }
+
+  const rowIdSet = new Set(uniqueRowIds);
+
+  const [occurrenceBookingRows, sourceRefBookingRows] = await Promise.all([
+    db
+      .select({
+        bookingId: timetableImportOccurrences.bookingId,
+      })
+      .from(timetableImportOccurrences)
+      .where(
+        and(
+          eq(timetableImportOccurrences.batchId, batchId),
+          inArray(timetableImportOccurrences.rowId, uniqueRowIds),
+        ),
+      ),
+    db
+      .select({
+        id: bookings.id,
+        sourceRef: bookings.sourceRef,
+      })
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.source, "TIMETABLE_ALLOCATION"),
+          like(bookings.sourceRef, `batch:${batchId}:row:%`),
+        ),
+      ),
+  ]);
+
+  const ids = new Set<number>();
+
+  for (const row of occurrenceBookingRows) {
+    if (typeof row.bookingId === "number") {
+      ids.add(row.bookingId);
+    }
+  }
+
+  for (const row of sourceRefBookingRows) {
+    const sourceRowId = parseRowIdFromSourceRef(row.sourceRef);
+
+    if (sourceRowId && rowIdSet.has(sourceRowId)) {
+      ids.add(row.id);
+    }
+  }
+
+  return Array.from(ids);
+}
+
+async function resetRowsForReallocation(
+  batchId: number,
+  rowIds: number[],
+): Promise<{ deletedBookings: number }> {
+  const uniqueRowIds = Array.from(
+    new Set(rowIds.filter((rowId) => Number.isInteger(rowId) && rowId > 0)),
+  );
+
+  if (uniqueRowIds.length === 0) {
+    return {
+      deletedBookings: 0,
+    };
+  }
+
+  const bookingIds = await getBatchLinkedBookingIdsForRows(batchId, uniqueRowIds);
   const now = new Date();
 
   await db.transaction(async (tx) => {
@@ -2273,7 +2396,12 @@ async function resetBatchForReallocation(batchId: number): Promise<{ deletedBook
 
     await tx
       .delete(timetableImportOccurrences)
-      .where(eq(timetableImportOccurrences.batchId, batchId));
+      .where(
+        and(
+          eq(timetableImportOccurrences.batchId, batchId),
+          inArray(timetableImportOccurrences.rowId, uniqueRowIds),
+        ),
+      );
 
     await tx
       .update(timetableImportRowResolutions)
@@ -2286,15 +2414,12 @@ async function resetBatchForReallocation(batchId: number): Promise<{ deletedBook
         reasons: sql`'[]'::jsonb`,
         updatedAt: now,
       })
-      .where(eq(timetableImportRowResolutions.batchId, batchId));
-
-    await tx
-      .update(timetableImportBatches)
-      .set({
-        status: "PREVIEWED",
-        committedAt: null,
-      })
-      .where(eq(timetableImportBatches.id, batchId));
+      .where(
+        and(
+          eq(timetableImportRowResolutions.batchId, batchId),
+          inArray(timetableImportRowResolutions.rowId, uniqueRowIds),
+        ),
+      );
   });
 
   return {
@@ -2326,6 +2451,10 @@ export async function reallocateTimetableImport(input: CommitImportInput): Promi
     throw createServiceError(409, "Only committed batches can be reallocated");
   }
 
+  const beforeSavedDecisionByRowId = new Map(
+    (await getSavedDecisions(batchId)).map((decision) => [decision.rowId, decision]),
+  );
+
   if (input.decisions !== undefined) {
     await saveTimetableImportDecisions({
       batchId,
@@ -2333,11 +2462,41 @@ export async function reallocateTimetableImport(input: CommitImportInput): Promi
     });
   }
 
-  await resetBatchForReallocation(batchId);
+  const afterSavedDecisionByRowId = new Map(
+    (await getSavedDecisions(batchId)).map((decision) => [decision.rowId, decision]),
+  );
+
+  const changedRowIds: number[] = [];
+  const candidateRowIds = new Set<number>([
+    ...beforeSavedDecisionByRowId.keys(),
+    ...afterSavedDecisionByRowId.keys(),
+  ]);
+
+  for (const rowId of candidateRowIds) {
+    const beforeSignature = toSavedDecisionSignature(beforeSavedDecisionByRowId.get(rowId));
+    const afterSignature = toSavedDecisionSignature(afterSavedDecisionByRowId.get(rowId));
+
+    if (beforeSignature !== afterSignature) {
+      changedRowIds.push(rowId);
+    }
+  }
+
+  if (changedRowIds.length === 0) {
+    const committedReport = await buildCommittedReport(batchId);
+
+    return {
+      ...committedReport,
+      warnings: [...committedReport.warnings, "No changed rows detected. Reallocation skipped."],
+    };
+  }
+
+  await resetRowsForReallocation(batchId, changedRowIds);
 
   return commitTimetableImport({
     batchId,
-    ...(input.decisions !== undefined ? { decisions: input.decisions } : {}),
+  }, {
+    allowCommittedBatch: true,
+    targetRowIds: changedRowIds,
   });
 }
 
@@ -2631,8 +2790,12 @@ async function buildCommittedReport(batchId: number): Promise<CommitReport> {
     getBatchRows(batchId),
     db
       .select({
+        occurrenceId: timetableImportOccurrences.id,
         rowId: timetableImportOccurrences.rowId,
         status: timetableImportOccurrences.status,
+        roomId: timetableImportOccurrences.roomId,
+        startAt: timetableImportOccurrences.startAt,
+        endAt: timetableImportOccurrences.endAt,
         bookingId: timetableImportOccurrences.bookingId,
         errorMessage: timetableImportOccurrences.errorMessage,
       })
@@ -2658,6 +2821,7 @@ async function buildCommittedReport(batchId: number): Promise<CommitReport> {
   );
 
   const summaryByRowId = new Map<number, CommitRowSummary>();
+  const conflictingBookings: CommitConflictItem[] = [];
 
   for (const row of rows) {
     const storedResolution = resolutionByRowId.get(row.id);
@@ -2698,6 +2862,15 @@ async function buildCommittedReport(batchId: number): Promise<CommitReport> {
 
     if (isBookingConflict && occurrence.errorMessage) {
       rowSummary.bookingConflictReasons.push(occurrence.errorMessage);
+      conflictingBookings.push({
+        rowId: occurrence.rowId,
+        rowIndex: rowSummary.rowIndex,
+        occurrenceId: occurrence.occurrenceId,
+        roomId: occurrence.roomId,
+        startAt: occurrence.startAt.toISOString(),
+        endAt: occurrence.endAt.toISOString(),
+        message: occurrence.errorMessage,
+      });
     }
 
     if (resolutionByRowId.has(occurrence.rowId)) {
@@ -2749,18 +2922,35 @@ async function buildCommittedReport(batchId: number): Promise<CommitReport> {
     skippedRows,
     bookingConflictRows,
     bookingConflictOccurrences,
+    conflictingBookings,
     rowResults,
     warnings: [],
   };
 }
 
-export async function commitTimetableImport(input: CommitImportInput): Promise<CommitReport> {
+type CommitExecutionOptions = {
+  allowCommittedBatch?: boolean;
+  targetRowIds?: number[];
+};
+
+export async function commitTimetableImport(
+  input: CommitImportInput,
+  options: CommitExecutionOptions = {},
+): Promise<CommitReport> {
   const batchId = Number(input.batchId);
   if (!Number.isInteger(batchId) || batchId <= 0) {
     throw createServiceError(400, "Invalid batchId");
   }
 
   const explicitDecisions = parseDecisionInput(input.decisions);
+  const targetRowIdSet =
+    Array.isArray(options.targetRowIds) && options.targetRowIds.length > 0
+      ? new Set(
+          options.targetRowIds.filter(
+            (rowId) => Number.isInteger(rowId) && rowId > 0,
+          ),
+        )
+      : null;
 
   const [batch] = await db
     .select({
@@ -2779,7 +2969,7 @@ export async function commitTimetableImport(input: CommitImportInput): Promise<C
     throw createServiceError(404, "Import batch not found");
   }
 
-  if (batch.status === "COMMITTED") {
+  if (batch.status === "COMMITTED" && !options.allowCommittedBatch) {
     return buildCommittedReport(batchId);
   }
 
@@ -2801,7 +2991,10 @@ export async function commitTimetableImport(input: CommitImportInput): Promise<C
     decisions.set(rowId, decision);
   }
 
-  const rows = await getBatchRows(batchId);
+  const batchRows = await getBatchRows(batchId);
+  const rows = targetRowIdSet
+    ? batchRows.filter((row) => targetRowIdSet.has(row.id))
+    : batchRows;
   let slotLookup = await getSlotDescriptorLookup(batch.slotSystemId);
   const buildingLookup = await getBuildingRoomLookup();
   const slotSystemStructure = await getSlotSystemStructure(batch.slotSystemId);
@@ -2820,6 +3013,7 @@ export async function commitTimetableImport(input: CommitImportInput): Promise<C
   }> = [];
 
   const warnings: string[] = [];
+  const conflictingBookings: CommitConflictItem[] = [];
 
   for (const row of rows) {
     const summary: CommitRowSummary = {
@@ -2975,7 +3169,7 @@ export async function commitTimetableImport(input: CommitImportInput): Promise<C
               roomId: resolvedRoomId,
               startAt: interval.startAt,
               endAt: interval.endAt,
-              source: "TIMETABLE_IMPORT",
+              source: "TIMETABLE_ALLOCATION",
               sourceRef: `batch:${batch.id}:row:${row.id}:block:${descriptor.blockId}`,
               dedupeKey,
               status: "PENDING",
@@ -3019,7 +3213,7 @@ export async function commitTimetableImport(input: CommitImportInput): Promise<C
         endAt: item.endAt.toISOString(),
         clientRowId: item.dedupeKey,
         metadata: {
-          source: "TIMETABLE_IMPORT",
+          source: "TIMETABLE_ALLOCATION",
           sourceRef: item.sourceRef,
         },
       })),
@@ -3068,6 +3262,15 @@ export async function commitTimetableImport(input: CommitImportInput): Promise<C
 
         if (isBookingConflict) {
           rowSummary.bookingConflictReasons.push(outcome.result.message);
+          conflictingBookings.push({
+            rowId: queued.rowId,
+            rowIndex: rowSummary.rowIndex,
+            occurrenceId: queued.occurrenceId,
+            roomId: queued.roomId,
+            startAt: queued.startAt.toISOString(),
+            endAt: queued.endAt.toISOString(),
+            message: outcome.result.message,
+          });
         } else {
           rowSummary.reasons.push(outcome.result.message);
         }
@@ -3139,6 +3342,7 @@ export async function commitTimetableImport(input: CommitImportInput): Promise<C
     skippedRows,
     bookingConflictRows,
     bookingConflictOccurrences,
+    conflictingBookings,
     rowResults,
     warnings: [
       ...(Array.isArray(batch.warnings) ? (batch.warnings as string[]) : []),
@@ -3287,9 +3491,10 @@ export async function getTimetableImportProcessedRows(
       typeof occurrence.bookingRoomId === "number" &&
       occurrence.bookingStartAt instanceof Date &&
       occurrence.bookingEndAt instanceof Date &&
-      (occurrence.bookingSource === "MANUAL" ||
-        occurrence.bookingSource === "BOOKING_REQUEST" ||
-        occurrence.bookingSource === "TIMETABLE_IMPORT")
+      (occurrence.bookingSource === "MANUAL_REQUEST" ||
+        occurrence.bookingSource === "TIMETABLE_ALLOCATION" ||
+        occurrence.bookingSource === "SLOT_CHANGE" ||
+        occurrence.bookingSource === "VENUE_CHANGE")
         ? {
             id: occurrence.bookingId,
             roomId: occurrence.bookingRoomId,
