@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import type { SetupRole } from "./api/api";
 import { useAuth } from "./auth/AuthContext";
 import { RoomsPage } from "./pages/Rooms";
 import { BookingRequestsPage } from "./pages/BookingRequests";
@@ -74,17 +75,83 @@ function PageRenderer({
 }
 
 function App() {
-  const { user, login, logout } = useAuth();
+  const { user, login, loginWithGoogle, loginWithToken, completeSetup, logout } = useAuth();
   const [activePage, setActivePage] = useState<PageKey>("rooms");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [bookingRequestPrefill, setBookingRequestPrefill] = useState<BookingRequestPrefill | null>(null);
   const [availabilityPrefill, setAvailabilityPrefill] = useState<AvailabilityPrefill | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
   // Login state
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [setupRole, setSetupRole] = useState<SetupRole>("STUDENT");
+  const [setupDepartment, setSetupDepartment] = useState("");
+  const [setupLoading, setSetupLoading] = useState(false);
+
+  const pathname = window.location.pathname;
+  const searchParams = new URLSearchParams(window.location.search);
+  const routeToken = searchParams.get("token");
+  const routeError = searchParams.get("error");
+  const isOAuthCallbackPath = pathname === "/auth/callback";
+  const isOAuthSetupPath = pathname === "/auth/setup";
+  const isOAuthFailed = routeError === "oauth_failed";
+  const isFirstLoginCallback = searchParams.get("firstLogin") === "true";
+
+  useEffect(() => {
+    if (user || !isOAuthFailed) {
+      return;
+    }
+
+    setAuthError("Google sign-in failed. Please try again.");
+  }, [user, isOAuthFailed]);
+
+  useEffect(() => {
+    if (user || !isOAuthCallbackPath) {
+      return;
+    }
+
+    if (!routeToken) {
+      setAuthError("Missing OAuth token in callback URL");
+      return;
+    }
+
+    let isCancelled = false;
+
+    setAuthLoading(true);
+    setAuthError(null);
+
+    void loginWithToken(routeToken)
+      .then(() => {
+        if (isCancelled) {
+          return;
+        }
+
+        if (isFirstLoginCallback) {
+          setAuthNotice("Welcome! Please review your profile and preferences.");
+        }
+
+        window.history.replaceState({}, "", "/");
+      })
+      .catch((e) => {
+        if (isCancelled) {
+          return;
+        }
+
+        setAuthError(e instanceof Error ? e.message : "Google login failed");
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setAuthLoading(false);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [user, isOAuthCallbackPath, routeToken, isFirstLoginCallback, loginWithToken]);
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -105,8 +172,117 @@ function App() {
     }
   };
 
+  const handleGoogleLogin = async () => {
+    setAuthError(null);
+    setAuthLoading(true);
+
+    try {
+      await loginWithGoogle();
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : "Failed to start Google login");
+      setAuthLoading(false);
+    }
+  };
+
+  const handleCompleteSetup = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!routeToken) {
+      setAuthError("Missing setup token");
+      return;
+    }
+
+    setSetupLoading(true);
+    setAuthError(null);
+
+    try {
+      const trimmedDepartment = setupDepartment.trim();
+
+      await completeSetup(
+        routeToken,
+        setupRole,
+        trimmedDepartment.length > 0 ? trimmedDepartment : undefined,
+      );
+
+      setAuthNotice("Account setup complete. You are now signed in.");
+      window.history.replaceState({}, "", "/");
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : "Failed to complete setup");
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
   // ——— Login screen ———
   if (!user) {
+    if (isOAuthCallbackPath) {
+      return (
+        <div className="login-page">
+          <div className="login-card">
+            <h1>Room Booking System</h1>
+            <p className="subtitle">Completing Google sign-in…</p>
+            {authError ? (
+              <div className="alert alert-error" style={{ marginTop: "var(--space-4)" }}>
+                {authError}
+              </div>
+            ) : (
+              <p className="loading-text">Please wait while we verify your account.</p>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    if (isOAuthSetupPath) {
+      return (
+        <div className="login-page">
+          <form className="login-card" onSubmit={handleCompleteSetup}>
+            <h1>Complete Account Setup</h1>
+            <p className="subtitle">Choose your role to finish Google sign-in</p>
+
+            <div className="form-grid">
+              <div className="form-field">
+                <label htmlFor="setupRole">Role</label>
+                <select
+                  id="setupRole"
+                  className="input"
+                  value={setupRole}
+                  onChange={(e) => setSetupRole(e.target.value as SetupRole)}
+                  disabled={setupLoading}
+                >
+                  <option value="STUDENT">STUDENT</option>
+                  <option value="FACULTY">FACULTY</option>
+                </select>
+              </div>
+
+              <div className="form-field">
+                <label htmlFor="setupDepartment">Department (optional)</label>
+                <input
+                  id="setupDepartment"
+                  className="input"
+                  type="text"
+                  value={setupDepartment}
+                  onChange={(e) => setSetupDepartment(e.target.value)}
+                  placeholder="Computer Science"
+                  disabled={setupLoading}
+                />
+              </div>
+            </div>
+
+            <button type="submit" className="btn btn-primary" disabled={setupLoading}>
+              {setupLoading ? "Finishing setup…" : "Complete Setup"}
+            </button>
+
+            {authError && (
+              <div className="alert alert-error" style={{ marginTop: "var(--space-4)" }}>
+                {authError}
+              </div>
+            )}
+          </form>
+        </div>
+      );
+    }
+
     return (
       <div className="login-page">
         <form className="login-card" onSubmit={handleLogin}>
@@ -142,6 +318,19 @@ function App() {
 
           <button type="submit" className="btn btn-primary" disabled={authLoading}>
             {authLoading ? "Signing in…" : "Sign In"}
+          </button>
+
+          <div className="auth-divider" aria-hidden="true">
+            <span>or</span>
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-google"
+            onClick={handleGoogleLogin}
+            disabled={authLoading}
+          >
+            Continue with Google (@iitj.ac.in)
           </button>
 
           {authError && <div className="alert alert-error" style={{ marginTop: "var(--space-4)" }}>{authError}</div>}
@@ -234,6 +423,7 @@ function App() {
 
       {/* Page content */}
       <main className="main-area">
+        {authNotice && <div className="alert alert-success">{authNotice}</div>}
         <PageRenderer
           page={activePage}
           canRequestBooking={canRequestBooking}

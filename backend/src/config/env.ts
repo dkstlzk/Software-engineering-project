@@ -1,3 +1,43 @@
 import dotenv from "dotenv";
 
 dotenv.config();
+
+function requireEnv(name: string): string {
+	const value = process.env[name];
+
+	if (!value) {
+		throw new Error(`${name} is not defined in environment`);
+	}
+
+	return value;
+}
+
+function optionalEnv(name: string): string | null {
+	const value = process.env[name];
+
+	if (!value) {
+		return null;
+	}
+
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : null;
+}
+
+export const env = {
+	NODE_ENV: process.env.NODE_ENV ?? "development",
+	PORT: Number(process.env.PORT ?? "5000"),
+	DATABASE_URL: requireEnv("DATABASE_URL"),
+	JWT_SECRET: requireEnv("JWT_SECRET"),
+	GOOGLE_CLIENT_ID: optionalEnv("GOOGLE_CLIENT_ID"),
+	GOOGLE_CLIENT_SECRET: optionalEnv("GOOGLE_CLIENT_SECRET"),
+	GOOGLE_CALLBACK_URL: optionalEnv("GOOGLE_CALLBACK_URL"),
+	SESSION_SECRET: optionalEnv("SESSION_SECRET"),
+	FRONTEND_URL: (optionalEnv("FRONTEND_URL") ?? "http://localhost:5173").replace(
+		/\/$/, "",
+	),
+};
+
+export const isGoogleOAuthConfigured =
+	env.GOOGLE_CLIENT_ID !== null &&
+	env.GOOGLE_CLIENT_SECRET !== null &&
+	env.GOOGLE_CALLBACK_URL !== null;

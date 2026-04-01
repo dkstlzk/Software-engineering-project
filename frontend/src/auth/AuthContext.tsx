@@ -9,15 +9,22 @@ import {
 import type { ReactNode } from "react";
 import {
   clearAuth,
+  completeOAuthSetup,
   getAuthUser,
   login as apiLogin,
+  loginWithOAuthToken,
+  startGoogleOAuthLogin,
   setOnUnauthorized,
+  type SetupRole,
 } from "../api/api";
 import type { AuthUser } from "../api/api";
 
 type AuthContextValue = {
   user: AuthUser | null;
   login: (email: string, password: string) => Promise<void>;
+  loginWithGoogle: () => Promise<void>;
+  loginWithToken: (token: string) => Promise<void>;
+  completeSetup: (setupToken: string, role: SetupRole, department?: string) => Promise<void>;
   logout: () => void;
 };
 
@@ -43,9 +50,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(loggedInUser);
   }, []);
 
+  const loginWithGoogle = useCallback(async () => {
+    await startGoogleOAuthLogin();
+  }, []);
+
+  const loginWithToken = useCallback(async (token: string) => {
+    const loggedInUser = await loginWithOAuthToken(token);
+    setUser(loggedInUser);
+  }, []);
+
+  const completeSetup = useCallback(
+    async (setupToken: string, role: SetupRole, department?: string) => {
+      const loggedInUser = await completeOAuthSetup({
+        setupToken,
+        role,
+        ...(department !== undefined ? { department } : {}),
+      });
+      setUser(loggedInUser);
+    },
+    [],
+  );
+
   const value = useMemo(
-    () => ({ user, login, logout }),
-    [user, login, logout]
+    () => ({ user, login, loginWithGoogle, loginWithToken, completeSetup, logout }),
+    [user, login, loginWithGoogle, loginWithToken, completeSetup, logout]
   );
 
   return (

@@ -1414,6 +1414,46 @@ button, input, select, textarea { font: inherit; }
   font-size: 0.9rem;
 }
 
+.auth-divider {
+  position: relative;
+  margin: var(--space-4) 0;
+  text-align: center;
+  color: var(--gray-500);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.auth-divider::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 1px solid var(--color-border);
+  transform: translateY(-50%);
+}
+
+.auth-divider span {
+  position: relative;
+  z-index: 1;
+  padding: 0 var(--space-3);
+  background: var(--color-bg-surface);
+}
+
+.btn-google {
+  width: 100%;
+  border-color: var(--color-border);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+}
+
+.btn-google:hover:not(:disabled) {
+  border-color: var(--color-accent-info);
+  box-shadow: 0 0 0 1px rgba(74, 158, 255, 0.36);
+  transform: translateY(-1px);
+}
+
 /* ===== Inline Edit ===== */
 .inline-edit {
   display: flex;

@@ -113,6 +113,20 @@
       "when": 1775129928919,
       "tag": "0015_tearful_vin_gonzales",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1775193922040,
+      "tag": "0016_course_oauth_slot_change",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1775194647301,
+      "tag": "0017_pending_role_for_oauth",
+      "breakpoints": true
     }
   ]
 }

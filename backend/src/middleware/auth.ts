@@ -1,12 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { env } from "../config/env";
+import type { UserRole } from "../auth/jwt";
 
 // ------------------------
 // Types
 // ------------------------
-type UserRole = "ADMIN" | "STAFF" | "FACULTY" | "STUDENT";
-
-interface AuthUser {
+interface AuthPayload {
   id: number;
   role: UserRole;
 }
@@ -14,8 +14,9 @@ interface AuthUser {
 // Extend Express Request
 declare global {
   namespace Express {
-    interface Request {
-      user?: AuthUser;
+    interface User {
+      id: number;
+      role: UserRole;
     }
   }
 }
@@ -23,21 +24,19 @@ declare global {
 // ------------------------
 // Ensure JWT_SECRET exists (proper TS-safe way)
 // ------------------------
-if (!process.env.JWT_SECRET) {
-  throw new Error("JWT_SECRET is not defined in environment");
-}
-
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = env.JWT_SECRET;
 
 // ------------------------
 // Type guard
 // ------------------------
-function isAuthPayload(payload: any): payload is AuthUser {
+function isAuthPayload(payload: any): payload is AuthPayload {
   return (
     payload &&
     typeof payload === "object" &&
     typeof payload.id === "number" &&
-    ["ADMIN", "STAFF", "FACULTY", "STUDENT"].includes(payload.role)
+    ["ADMIN", "STAFF", "FACULTY", "STUDENT", "PENDING_ROLE"].includes(
+      payload.role,
+    )
   );
 }
 

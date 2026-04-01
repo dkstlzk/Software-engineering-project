@@ -3,7 +3,10 @@ import {
   pgEnum,
   serial,
   text,
+  boolean,
   uniqueIndex,
+  index,
+  check,
   integer,
   timestamp,
   jsonb,
@@ -324,26 +327,39 @@ export const bookingStatusEnum = pgEnum("booking_status", [
   "CANCELLED",
 ]);
 
-export const bookingRequests = pgTable("booking_requests", {
-  id: serial("id").primaryKey(),
+export const bookingRequests = pgTable(
+  "booking_requests",
+  {
+    id: serial("id").primaryKey(),
 
-  userId: integer("user_id").references(() => users.id, {
-    onDelete: "set null",
+    userId: integer("user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+
+    facultyId: integer("faculty_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+
+    roomId: integer("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade" }),
+
+    startAt: timestamp("start_at").notNull(),
+    endAt: timestamp("end_at").notNull(),
+
+    purpose: text("purpose").notNull(),
+
+    status: bookingStatusEnum("status").notNull().default("PENDING_FACULTY"),
+
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    userIdIdx: index("booking_requests_user_id_idx").on(table.userId),
+    facultyIdIdx: index("booking_requests_faculty_id_idx").on(table.facultyId),
+    roomIdIdx: index("booking_requests_room_id_idx").on(table.roomId),
+    statusIdx: index("booking_requests_status_idx").on(table.status),
   }),
-
-  roomId: integer("room_id")
-    .notNull()
-    .references(() => rooms.id, { onDelete: "cascade" }),
-
-  startAt: timestamp("start_at").notNull(),
-  endAt: timestamp("end_at").notNull(),
-
-  purpose: text("purpose").notNull(),
-
-  status: bookingStatusEnum("status").notNull().default("PENDING_FACULTY"),
-
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+);
 
 // ------------------------
 // User Role Enum
@@ -353,25 +369,205 @@ export const userRoleEnum = pgEnum("user_role", [
   "STAFF",
   "FACULTY",
   "STUDENT",
+  "PENDING_ROLE",
 ]);
 
 // ------------------------
 // Users Table
 // ------------------------
-export const users = pgTable("users", {
-  id: serial("id").primaryKey(),
+export const users = pgTable(
+  "users",
+  {
+    id: serial("id").primaryKey(),
 
-  name: text("name").notNull(),
+    name: text("name").notNull(),
 
-  email: text("email").notNull().unique(),
+    email: text("email").notNull().unique(),
 
-  passwordHash: text("password_hash").notNull(),
+    passwordHash: text("password_hash").notNull(),
 
-  role: userRoleEnum("role").notNull(),
+    role: userRoleEnum("role").notNull(),
 
-  createdAt: timestamp("created_at", { withTimezone: false })
-    .defaultNow()
-    .notNull(),
-});
+    googleId: text("google_id"),
+    avatarUrl: text("avatar_url"),
+    displayName: text("display_name"),
+    department: text("department"),
+    isActive: boolean("is_active").notNull().default(true),
+    registeredVia: text("registered_via").notNull().default("email"),
+    firstLogin: boolean("first_login").notNull().default(true),
+
+    createdAt: timestamp("created_at", { withTimezone: false })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => ({
+    googleIdUnique: uniqueIndex("users_google_id_unique").on(table.googleId),
+    departmentIdx: index("users_department_idx").on(table.department),
+    isActiveIdx: index("users_is_active_idx").on(table.isActive),
+    registeredViaIdx: index("users_registered_via_idx").on(table.registeredVia),
+    registeredViaAllowedCheck: check(
+      "users_registered_via_allowed_check",
+      sql`${table.registeredVia} IN ('email', 'google')`,
+    ),
+    googleDomainCheck: check(
+      "users_google_email_domain_check",
+      sql`${table.registeredVia} <> 'google' OR lower(${table.email}) LIKE '%@iitj.ac.in'`,
+    ),
+  }),
+);
+
+export const courses = pgTable(
+  "courses",
+  {
+    id: serial("id").primaryKey(),
+    code: text("code").notNull(),
+    name: text("name").notNull(),
+    department: text("department").notNull(),
+    credits: integer("credits").notNull(),
+    description: text("description"),
+    createdBy: integer("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+    isActive: boolean("is_active").notNull().default(true),
+  },
+  (table) => ({
+    codeUnique: uniqueIndex("courses_code_unique").on(table.code),
+    createdByIdx: index("courses_created_by_idx").on(table.createdBy),
+    departmentIdx: index("courses_department_idx").on(table.department),
+    nameIdx: index("courses_name_idx").on(table.name),
+    isActiveIdx: index("courses_is_active_idx").on(table.isActive),
+  }),
+);
+
+export const courseFaculty = pgTable(
+  "course_faculty",
+  {
+    courseId: integer("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    facultyId: integer("faculty_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+  },
+  (table) => ({
+    pairUnique: uniqueIndex("course_faculty_course_id_faculty_id_unique").on(
+      table.courseId,
+      table.facultyId,
+    ),
+    courseIdIdx: index("course_faculty_course_id_idx").on(table.courseId),
+    facultyIdIdx: index("course_faculty_faculty_id_idx").on(table.facultyId),
+  }),
+);
+
+export const courseEnrollments = pgTable(
+  "course_enrollments",
+  {
+    courseId: integer("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    studentId: integer("student_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    enrolledAt: timestamp("enrolled_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    pairUnique: uniqueIndex(
+      "course_enrollments_course_id_student_id_unique",
+    ).on(table.courseId, table.studentId),
+    courseIdIdx: index("course_enrollments_course_id_idx").on(table.courseId),
+    studentIdIdx: index("course_enrollments_student_id_idx").on(table.studentId),
+  }),
+);
+
+export const bookingCourseLink = pgTable(
+  "booking_course_link",
+  {
+    bookingId: integer("booking_id")
+      .notNull()
+      .references(() => bookings.id, { onDelete: "cascade" }),
+    courseId: integer("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+  },
+  (table) => ({
+    pairUnique: uniqueIndex("booking_course_link_booking_id_course_id_unique").on(
+      table.bookingId,
+      table.courseId,
+    ),
+    bookingIdIdx: index("booking_course_link_booking_id_idx").on(table.bookingId),
+    courseIdIdx: index("booking_course_link_course_id_idx").on(table.courseId),
+  }),
+);
+
+export const slotChangeRequestStatusEnum = pgEnum("slot_change_request_status", [
+  "PENDING",
+  "APPROVED",
+  "REJECTED",
+  "CANCELLED",
+]);
+
+export const slotChangeRequests = pgTable(
+  "slot_change_requests",
+  {
+    id: serial("id").primaryKey(),
+    requestedBy: integer("requested_by")
+      .notNull()
+      .references(() => users.id),
+    courseId: integer("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    currentBookingId: integer("current_booking_id")
+      .notNull()
+      .references(() => bookings.id, { onDelete: "cascade" }),
+    proposedRoomId: integer("proposed_room_id").references(() => rooms.id, {
+      onDelete: "set null",
+    }),
+    proposedStart: timestamp("proposed_start", { withTimezone: true }).notNull(),
+    proposedEnd: timestamp("proposed_end", { withTimezone: true }).notNull(),
+    reason: text("reason").notNull(),
+    status: slotChangeRequestStatusEnum("status").notNull().default("PENDING"),
+    reviewedBy: integer("reviewed_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    reviewNote: text("review_note"),
+    createdAt: timestamp("created_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    requestedByIdx: index("slot_change_requests_requested_by_idx").on(
+      table.requestedBy,
+    ),
+    courseIdIdx: index("slot_change_requests_course_id_idx").on(table.courseId),
+    currentBookingIdIdx: index("slot_change_requests_current_booking_id_idx").on(
+      table.currentBookingId,
+    ),
+    proposedRoomIdIdx: index("slot_change_requests_proposed_room_id_idx").on(
+      table.proposedRoomId,
+    ),
+    reviewedByIdx: index("slot_change_requests_reviewed_by_idx").on(
+      table.reviewedBy,
+    ),
+    statusIdx: index("slot_change_requests_status_idx").on(table.status),
+    proposedStartIdx: index("slot_change_requests_proposed_start_idx").on(
+      table.proposedStart,
+    ),
+    proposedEndIdx: index("slot_change_requests_proposed_end_idx").on(
+      table.proposedEnd,
+    ),
+    proposedRangeCheck: check(
+      "slot_change_requests_valid_proposed_range_check",
+      sql`${table.proposedEnd} > ${table.proposedStart}`,
+    ),
+  }),
+);
 
 export * from "../modules/timetable/schema";

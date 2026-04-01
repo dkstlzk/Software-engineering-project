@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-
-type UserRole = "ADMIN" | "STAFF" | "FACULTY" | "STUDENT";
+import type { UserRole } from "../auth/jwt";
 
 // ------------------------
 // RBAC Middleware
