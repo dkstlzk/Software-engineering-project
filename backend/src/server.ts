@@ -13,6 +13,7 @@ import bookingRequestsRouter from "./routes/bookingRequests";
 import availabilityRoutes from './routes/availability';
 import authRoutes from "./routes/auth";
 import usersRoutes from "./routes/users";
+import notificationsRoutes from "./routes/notifications";
 import timetableRoutes from "./modules/timetable/routes";
 
 
@@ -56,6 +57,8 @@ app.use("/auth", authRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/users", usersRoutes);
 app.use("/api/users", usersRoutes);
+app.use("/notifications", notificationsRoutes);
+app.use("/api/notifications", notificationsRoutes);
 app.use("/timetable", timetableRoutes);
 app.use("/api/timetable", timetableRoutes);
 

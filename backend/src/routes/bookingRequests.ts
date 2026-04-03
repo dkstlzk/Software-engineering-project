@@ -6,6 +6,12 @@ import { authMiddleware } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import { createBooking, hasBookingOverlap } from "../services/bookingService";
 import { getAssignedBuildingIdsForStaff } from "../services/staffBuildingScope";
+import {
+  getActiveAdminIds,
+  getActiveStaffIdsForBuilding,
+  sendRoleAwareNotifications,
+  type NotificationDraft,
+} from "../services/notificationService";
 
 const router = Router();
 
@@ -54,7 +60,7 @@ function isBookingEventType(value: unknown): value is BookingEventType {
 }
 
 function canViewRequest(
-  role: "ADMIN" | "STAFF" | "FACULTY" | "STUDENT",
+  role: "ADMIN" | "STAFF" | "FACULTY" | "STUDENT" | "PENDING_ROLE",
   userId: number,
   request: {
     userId: number | null;
@@ -83,6 +89,54 @@ function canViewRequest(
   }
 
   return false;
+}
+
+function formatDateTimeForNotification(value: Date): string {
+  return value.toISOString().replace("T", " ").slice(0, 16);
+}
+
+function formatRequestWindow(startAt: Date, endAt: Date): string {
+  return `${formatDateTimeForNotification(startAt)} to ${formatDateTimeForNotification(endAt)}`;
+}
+
+function uniqueRecipientIds(
+  rawIds: Array<number | null | undefined>,
+  excludedIds: number[] = [],
+): number[] {
+  const excluded = new Set(excludedIds);
+
+  return Array.from(
+    new Set(
+      rawIds.filter(
+        (value): value is number =>
+          typeof value === "number" && Number.isInteger(value) && value > 0,
+      ),
+    ),
+  ).filter((value) => !excluded.has(value));
+}
+
+async function dispatchNotificationsSafely(drafts: NotificationDraft[]) {
+  if (drafts.length === 0) {
+    return;
+  }
+
+  try {
+    await sendRoleAwareNotifications(drafts);
+  } catch (error) {
+    console.error("Failed to dispatch booking request notifications", error);
+  }
+}
+
+async function getPendingStaffAndAdminRecipientIds(
+  buildingId: number,
+  excludedIds: number[] = [],
+): Promise<number[]> {
+  const [staffIds, adminIds] = await Promise.all([
+    getActiveStaffIdsForBuilding(buildingId),
+    getActiveAdminIds(),
+  ]);
+
+  return uniqueRecipientIds([...staffIds, ...adminIds], excludedIds);
 }
 
 // GET /booking-requests/:id
@@ -261,6 +315,35 @@ router.post("/:id/reject", authMiddleware, requireRole(["FACULTY", "STAFF"]), as
       .where(eq(bookingRequests.id, id))
       .returning();
 
+    const participantRecipients = uniqueRecipientIds(
+      [request.userId, request.facultyId],
+      [req.user!.id],
+    );
+
+    const reviewerRecipients =
+      role === "STAFF"
+        ? await getPendingStaffAndAdminRecipientIds(row!.buildingId, [req.user!.id])
+        : [];
+
+    const windowText = formatRequestWindow(request.startAt, request.endAt);
+
+    await dispatchNotificationsSafely(
+      [
+        ...participantRecipients.map<NotificationDraft>((recipientId) => ({
+          recipientId,
+          type: "BOOKING_REQUEST_REJECTED",
+          subject: `Booking request #${request.id} rejected`,
+          message: `Booking request #${request.id} for room #${request.roomId} (${windowText}) was rejected.`,
+        })),
+        ...reviewerRecipients.map<NotificationDraft>((recipientId) => ({
+          recipientId,
+          type: "BOOKING_REQUEST_REJECTED",
+          subject: `Booking request #${request.id} rejected`,
+          message: `Booking request #${request.id} for room #${request.roomId} (${windowText}) has been rejected.`,
+        })),
+      ],
+    );
+
     return res.json(updated[0]);
 
   } catch (error) {
@@ -292,7 +375,7 @@ router.post("/:id/approve", authMiddleware, requireRole("STAFF"), async (req, re
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const booking = await db.transaction(async (tx) => {
+    const approvalResult = await db.transaction(async (tx) => {
       const rows = await tx
         .select()
         .from(bookingRequests)
@@ -348,10 +431,45 @@ router.post("/:id/approve", authMiddleware, requireRole("STAFF"), async (req, re
         .set({ status: "APPROVED" })
         .where(eq(bookingRequests.id, id));
 
-      return inserted.booking;
+      return {
+        booking: inserted.booking,
+        request,
+      };
     });
 
-    return res.json(booking);
+    const participantRecipients = uniqueRecipientIds(
+      [approvalResult.request.userId, approvalResult.request.facultyId],
+      [req.user!.id],
+    );
+
+    const reviewerRecipients = await getPendingStaffAndAdminRecipientIds(
+      scopeRow.buildingId,
+      [req.user!.id],
+    );
+
+    const approvalWindowText = formatRequestWindow(
+      approvalResult.request.startAt,
+      approvalResult.request.endAt,
+    );
+
+    await dispatchNotificationsSafely(
+      [
+        ...participantRecipients.map<NotificationDraft>((recipientId) => ({
+          recipientId,
+          type: "BOOKING_REQUEST_APPROVED",
+          subject: `Booking request #${approvalResult.request.id} approved`,
+          message: `Booking request #${approvalResult.request.id} for room #${approvalResult.request.roomId} (${approvalWindowText}) has been approved.`,
+        })),
+        ...reviewerRecipients.map<NotificationDraft>((recipientId) => ({
+          recipientId,
+          type: "BOOKING_REQUEST_APPROVED",
+          subject: `Booking request #${approvalResult.request.id} approved`,
+          message: `Booking request #${approvalResult.request.id} for room #${approvalResult.request.roomId} (${approvalWindowText}) was approved and converted to a booking.`,
+        })),
+      ],
+    );
+
+    return res.json(approvalResult.booking);
 
   } catch (error: any) {
     if (error?.type === "NOT_FOUND") {
@@ -397,13 +515,8 @@ router.post("/:id/forward", authMiddleware, requireRole("FACULTY"), async (req, 
   }
 
   try {
-    // Fetch request
-    const rows = await db
-      .select()
-      .from(bookingRequests)
-      .where(eq(bookingRequests.id, id));
-
-    const request = rows[0];
+    const row = await getRequestWithBuilding(id);
+    const request = row?.request;
 
     if (!request) {
       return res.status(404).json({ error: "Request not found" });
@@ -429,6 +542,35 @@ router.post("/:id/forward", authMiddleware, requireRole("FACULTY"), async (req, 
       .where(eq(bookingRequests.id, id))
       .returning();
 
+    const reviewRecipients = await getPendingStaffAndAdminRecipientIds(
+      row!.buildingId,
+      [req.user!.id],
+    );
+
+    const notifyRequesterRecipients = uniqueRecipientIds(
+      [request.userId],
+      [req.user!.id],
+    );
+
+    const windowText = formatRequestWindow(request.startAt, request.endAt);
+
+    const drafts: NotificationDraft[] = [
+      ...reviewRecipients.map<NotificationDraft>((recipientId) => ({
+        recipientId,
+        type: "BOOKING_REQUEST_FORWARDED",
+        subject: `Booking request #${request.id} awaiting staff approval`,
+        message: `Booking request #${request.id} for room #${request.roomId} (${windowText}) is awaiting staff/admin review.`,
+      })),
+      ...notifyRequesterRecipients.map<NotificationDraft>((recipientId) => ({
+        recipientId,
+        type: "BOOKING_REQUEST_FORWARDED",
+        subject: `Booking request #${request.id} moved to staff review`,
+        message: `Booking request #${request.id} for room #${request.roomId} (${windowText}) has been forwarded for staff/admin approval.`,
+      })),
+    ];
+
+    await dispatchNotificationsSafely(drafts);
+
     return res.json(updated[0]);
 
   } catch (error) {
@@ -446,18 +588,8 @@ router.post("/:id/cancel",authMiddleware, async (req, res) => {
   }
 
   try {
-    // Fetch request
-    const existingRows = await db
-      .select({
-        id: bookingRequests.id,
-        userId: bookingRequests.userId,
-        status: bookingRequests.status,
-      })
-      .from(bookingRequests)
-      .where(eq(bookingRequests.id, id))
-      .limit(1);
-
-    const existing = existingRows[0];
+    const existingRow = await getRequestWithBuilding(id);
+    const existing = existingRow?.request;
 
     if (!existing) {
       return res.status(404).json({ error: "Request not found" });
@@ -484,6 +616,35 @@ router.post("/:id/cancel",authMiddleware, async (req, res) => {
       .set({ status: "CANCELLED" })
       .where(eq(bookingRequests.id, id))
       .returning();
+
+    const participantRecipients = uniqueRecipientIds(
+      [existing.userId, existing.facultyId],
+      [req.user!.id],
+    );
+
+    const reviewerRecipients =
+      existing.status === "PENDING_STAFF"
+        ? await getPendingStaffAndAdminRecipientIds(existingRow!.buildingId, [req.user!.id])
+        : [];
+
+    const windowText = formatRequestWindow(existing.startAt, existing.endAt);
+
+    const cancellationDrafts: NotificationDraft[] = [
+      ...participantRecipients.map<NotificationDraft>((recipientId) => ({
+        recipientId,
+        type: "BOOKING_REQUEST_CANCELLED",
+        subject: `Booking request #${existing.id} cancelled`,
+        message: `Booking request #${existing.id} for room #${existing.roomId} (${windowText}) was cancelled.`,
+      })),
+      ...reviewerRecipients.map<NotificationDraft>((recipientId) => ({
+        recipientId,
+        type: "BOOKING_REQUEST_CANCELLED",
+        subject: `Booking request #${existing.id} cancelled`,
+        message: `Booking request #${existing.id} for room #${existing.roomId} (${windowText}) was cancelled by the requester/admin.`,
+      })),
+    ];
+
+    await dispatchNotificationsSafely(cancellationDrafts);
 
     return res.json(updated[0]);
   } catch (error) {
@@ -550,6 +711,21 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
 
     if (start >= end) {
       return res.status(400).json({ error: "startAt must be before endAt" });
+    }
+
+    const roomRows = await db
+      .select({
+        id: rooms.id,
+        buildingId: rooms.buildingId,
+      })
+      .from(rooms)
+      .where(eq(rooms.id, roomId))
+      .limit(1);
+
+    const room = roomRows[0];
+
+    if (!room) {
+      return res.status(404).json({ error: "Room not found" });
     }
 
     let facultyId: number | null = null;
@@ -641,7 +817,60 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
       })
       .returning();
 
-    return res.status(201).json(result[0]);
+    const created = result[0];
+
+    if (!created) {
+      return res.status(500).json({ error: "Insert failed" });
+    }
+
+    const windowText = formatRequestWindow(created.startAt, created.endAt);
+
+    if (created.status === "PENDING_FACULTY") {
+      const facultyRecipients = uniqueRecipientIds([created.facultyId], [req.user!.id]);
+      const requesterRecipients = uniqueRecipientIds([created.userId]);
+
+      await dispatchNotificationsSafely(
+        [
+          ...facultyRecipients.map<NotificationDraft>((recipientId) => ({
+            recipientId,
+            type: "BOOKING_REQUEST_CREATED",
+            subject: `Booking request #${created.id} awaiting faculty review`,
+            message: `Booking request #${created.id} for room #${created.roomId} (${windowText}) requires your faculty approval.`,
+          })),
+          ...requesterRecipients.map<NotificationDraft>((recipientId) => ({
+            recipientId,
+            type: "BOOKING_REQUEST_CREATED",
+            subject: `Booking request #${created.id} submitted`,
+            message: `Your booking request #${created.id} for room #${created.roomId} (${windowText}) has been submitted for faculty approval.`,
+          })),
+        ],
+      );
+    } else if (created.status === "PENDING_STAFF") {
+      const staffAdminRecipients = await getPendingStaffAndAdminRecipientIds(
+        room.buildingId,
+        [req.user!.id],
+      );
+      const requesterRecipients = uniqueRecipientIds([created.userId, created.facultyId]);
+
+      await dispatchNotificationsSafely(
+        [
+          ...staffAdminRecipients.map<NotificationDraft>((recipientId) => ({
+            recipientId,
+            type: "BOOKING_REQUEST_CREATED",
+            subject: `Booking request #${created.id} awaiting staff approval`,
+            message: `Booking request #${created.id} for room #${created.roomId} (${windowText}) is awaiting staff/admin review.`,
+          })),
+          ...requesterRecipients.map<NotificationDraft>((recipientId) => ({
+            recipientId,
+            type: "BOOKING_REQUEST_CREATED",
+            subject: `Booking request #${created.id} submitted`,
+            message: `Your booking request #${created.id} for room #${created.roomId} (${windowText}) has been submitted for staff/admin approval.`,
+          })),
+        ],
+      );
+    }
+
+    return res.status(201).json(created);
   } catch (error: any) {
     if (error?.cause?.code === "23503") {
       return res.status(404).json({ error: "Room not found" });

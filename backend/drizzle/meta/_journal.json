@@ -148,6 +148,13 @@
       "when": 1775213802823,
       "tag": "0020_staff_building_assignments",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1775215004464,
+      "tag": "0021_curved_black_panther",
+      "breakpoints": true
     }
   ]
 }

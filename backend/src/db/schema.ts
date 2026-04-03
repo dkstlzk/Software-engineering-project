@@ -442,6 +442,43 @@ export const users = pgTable(
   }),
 );
 
+export const notificationTypeEnum = pgEnum("notification_type", [
+  "BOOKING_REQUEST_CREATED",
+  "BOOKING_REQUEST_FORWARDED",
+  "BOOKING_REQUEST_APPROVED",
+  "BOOKING_REQUEST_REJECTED",
+  "BOOKING_REQUEST_CANCELLED",
+]);
+
+export const notifications = pgTable(
+  "notifications",
+  {
+    notificationId: serial("notification_id").primaryKey(),
+
+    recipientId: integer("recipient_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+
+    subject: text("subject").notNull(),
+
+    message: text("message").notNull(),
+
+    type: notificationTypeEnum("type").notNull(),
+
+    isRead: boolean("is_read").notNull().default(false),
+
+    sentAt: timestamp("sent_at", { withTimezone: false }).notNull().defaultNow(),
+  },
+  (table) => ({
+    recipientIdIdx: index("notifications_recipient_id_idx").on(table.recipientId),
+    recipientReadIdx: index("notifications_recipient_read_idx").on(
+      table.recipientId,
+      table.isRead,
+    ),
+    sentAtIdx: index("notifications_sent_at_idx").on(table.sentAt),
+  }),
+);
+
 export const staffBuildingAssignments = pgTable(
   "staff_building_assignments",
   {

@@ -30,14 +30,20 @@ router.get("/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Room not found" });
     }
 
+    const room = result[0];
+
+    if (!room) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
     if (
       req.user?.role === "STAFF" &&
-      !(await isBuildingAssignedToStaff(req.user.id, result[0].buildingId))
+      !(await isBuildingAssignedToStaff(req.user.id, room.buildingId))
     ) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    return res.json(result[0]);
+    return res.json(room);
   } catch {
     return res.status(500).json({ error: "Failed to fetch room" });
   }
@@ -232,9 +238,15 @@ router.delete("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (re
       return res.status(404).json({ error: "Room not found" });
     }
 
+    const room = existing[0];
+
+    if (!room) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
     if (
       req.user?.role === "STAFF" &&
-      !(await isBuildingAssignedToStaff(req.user.id, existing[0].buildingId))
+      !(await isBuildingAssignedToStaff(req.user.id, room.buildingId))
     ) {
       return res.status(403).json({ error: "Forbidden" });
     }
@@ -270,9 +282,15 @@ router.patch("/:id", authMiddleware, requireRole(["ADMIN", "STAFF"]), async (req
       return res.status(404).json({ error: "Room not found" });
     }
 
+    const room = existing[0];
+
+    if (!room) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
     if (
       req.user?.role === "STAFF" &&
-      !(await isBuildingAssignedToStaff(req.user.id, existing[0].buildingId))
+      !(await isBuildingAssignedToStaff(req.user.id, room.buildingId))
     ) {
       return res.status(403).json({ error: "Forbidden" });
     }
