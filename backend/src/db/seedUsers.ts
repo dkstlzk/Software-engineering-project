@@ -3,6 +3,7 @@ import "../config/env";
 import { db } from "./index";
 import { users } from "./schema";
 import bcrypt from "bcrypt";
+import logger from "../shared/utils/logger";
 
 async function seed() {
   try {
@@ -12,25 +13,25 @@ async function seed() {
     const seedData = [
       {
         name: "Admin User",
-        email: "admin@ura.com",
+        email: "admin@iitj.ac.in",
         passwordHash,
         role: "ADMIN" as const,
       },
       {
         name: "Staff User",
-        email: "staff@ura.com",
+        email: "staff@iitj.ac.in",
         passwordHash,
         role: "STAFF" as const,
       },
       {
         name: "Faculty User",
-        email: "faculty@ura.com",
+        email: "faculty@iitj.ac.in",
         passwordHash,
         role: "FACULTY" as const,
       },
       {
         name: "Student User",
-        email: "student@ura.com",
+        email: "student@iitj.ac.in",
         passwordHash,
         role: "STUDENT" as const,
       },
@@ -40,15 +41,15 @@ async function seed() {
       await db.insert(users).values(user);
     }
 
-    console.log("✅ Users seeded successfully");
+    logger.info("✅ Users seeded successfully");
     process.exit(0);
   } catch (error: any) {
     if (error?.cause?.code === "23505") {
-      console.log("⚠️ Users already exist (unique constraint hit)");
+      logger.info("⚠️ Users already exist (unique constraint hit)");
       process.exit(0);
     }
 
-    console.error("❌ Seeding failed:", error);
+    logger.error("❌ Seeding failed:", error);
     process.exit(1);
   }
 }

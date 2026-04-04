@@ -2,6 +2,7 @@ import {
   pgTable,
   pgEnum,
   serial,
+  AnyPgColumn,
   text,
   boolean,
   uniqueIndex,
@@ -10,20 +11,40 @@ import {
   integer,
   timestamp,
   jsonb,
+  varchar,
+  json,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { slotSystems } from "../modules/timetable/schema";
+
+// Forward declaration for users reference (defined later in this file)
+// We use a late reference pattern here
+
+export const roomTypeEnum = pgEnum("room_type", [
+  "LECTURE_HALL",
+  "CLASSROOM",
+  "SEMINAR_ROOM",
+  "COMPUTER_LAB",
+  "CONFERENCE_ROOM",
+  "AUDITORIUM",
+  "WORKSHOP",
+  "OTHER",
+]);
 
 export const buildings = pgTable(
   "buildings",
   {
     id: serial("id").primaryKey(),
     name: text("name").notNull(),
+    description: text("description"),
+    location: text("location"),
+    managedByStaffId: integer("managed_by_staff_id"),
   },
   (table) => ({
     nameUnique: uniqueIndex("buildings_name_unique").on(
       sql`lower(${table.name})`
     ),
+    managedByIdx: index("buildings_managed_by_idx").on(table.managedByStaffId),
   })
 );
 
@@ -35,15 +56,25 @@ export const rooms = pgTable(
     buildingId: integer("building_id")
       .notNull()
       .references(() => buildings.id),
+    capacity: integer("capacity"),
+    roomType: roomTypeEnum("room_type").default("OTHER"),
+    hasProjector: boolean("has_projector").notNull().default(false),
+    hasMic: boolean("has_mic").notNull().default(false),
+    accessible: boolean("accessible").notNull().default(true),
+    equipmentList: text("equipment_list"),
   },
   (table) => ({
     roomUniquePerBuilding: uniqueIndex("rooms_building_name_unique").on(
       table.buildingId,
       sql`lower(${table.name})`
     ),
+    accessibleIdx: index("rooms_accessible_idx").on(table.accessible),
   })
 );
 
+// Deprecated: Slot/Venue change system removed
+// retained only for backward compatibility
+// not used in current system
 export const bookingSourceEnum = pgEnum("booking_source", [
   "MANUAL_REQUEST",
   "TIMETABLE_ALLOCATION",
@@ -62,7 +93,7 @@ export const bookings = pgTable("bookings", {
 
   endAt: timestamp("end_at", { withTimezone: false }).notNull(),
 
-  requestId: integer("request_id").references(() => bookingRequests.id, {
+  requestId: integer("request_id").references((): AnyPgColumn => bookingRequests.id, {
     onDelete: "set null",
   }),
 
@@ -110,6 +141,19 @@ export const timetableImportDecisionActionEnum = pgEnum(
   ["AUTO", "RESOLVE", "SKIP"],
 );
 
+export const timetableCommitSessionStatusEnum = pgEnum(
+  "timetable_commit_session_status",
+  [
+    "STARTED",
+    "EXTERNAL_DONE",
+    "INTERNAL_DONE",
+    "FROZEN",
+    "COMPLETED",
+    "CANCELLED",
+    "FAILED",
+  ],
+);
+
 export type TimetableImportCreateSlotPayload = {
   dayId: number;
   startBandId: number;
@@ -147,6 +191,11 @@ export const timetableImportBatches = pgTable(
       .default(sql`'{}'::jsonb`),
 
     warnings: jsonb("warnings")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+
+    auxiliaryHeaders: jsonb("auxiliary_headers")
       .$type<string[]>()
       .notNull()
       .default(sql`'[]'::jsonb`),
@@ -217,6 +266,11 @@ export const timetableImportRows = pgTable(
 
     rowHash: text("row_hash"),
 
+    auxiliaryData: jsonb("auxiliary_data")
+      .$type<Record<string, string>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+
     createdAt: timestamp("created_at", { withTimezone: false })
       .notNull()
       .defaultNow(),
@@ -254,7 +308,7 @@ export const timetableImportOccurrences = pgTable(
 
     dedupeKey: text("dedupe_key").notNull(),
 
-    bookingId: integer("booking_id").references(() => bookings.id, {
+    bookingId: integer("booking_id").references((): AnyPgColumn => bookings.id, {
       onDelete: "set null",
     }),
 
@@ -326,12 +380,84 @@ export const timetableImportRowResolutions = pgTable(
   }),
 );
 
+export const commitSessions = pgTable(
+  "commit_sessions",
+  {
+    id: serial("id").primaryKey(),
+
+    batchId: integer("batch_id")
+      .notNull()
+      .references(() => timetableImportBatches.id, { onDelete: "cascade" }),
+
+    slotSystemId: integer("slot_system_id")
+      .notNull()
+      .references(() => slotSystems.id, { onDelete: "cascade" }),
+
+    status: timetableCommitSessionStatusEnum("status")
+      .notNull()
+      .default("STARTED"),
+
+    payloadSnapshot: text("payload_snapshot").notNull(),
+
+    operations: jsonb("operations")
+      .$type<unknown[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+
+    externalConflicts: jsonb("external_conflicts")
+      .$type<unknown[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+
+    internalConflicts: jsonb("internal_conflicts")
+      .$type<unknown[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+
+    runtimeConflicts: jsonb("runtime_conflicts")
+      .$type<unknown[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+
+    resolutions: jsonb("resolutions")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+
+    createdBy: integer("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+
+    frozenAt: timestamp("frozen_at", { withTimezone: false }),
+
+    createdAt: timestamp("created_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    batchIdIdx: index("commit_sessions_batch_id_idx").on(table.batchId),
+    slotSystemIdIdx: index("commit_sessions_slot_system_id_idx").on(table.slotSystemId),
+    statusIdx: index("commit_sessions_status_idx").on(table.status),
+    createdAtIdx: index("commit_sessions_created_at_idx").on(table.createdAt),
+  }),
+);
+
 export const bookingStatusEnum = pgEnum("booking_status", [
   "PENDING_FACULTY",
   "PENDING_STAFF",
   "APPROVED",
   "REJECTED",
   "CANCELLED",
+]);
+
+export const bookingEditRequestStatusEnum = pgEnum("booking_edit_request_status", [
+  "PENDING",
+  "APPROVED",
+  "REJECTED",
 ]);
 
 export const bookingEventTypeEnum = pgEnum("booking_event_type", [
@@ -374,6 +500,16 @@ export const bookingRequests = pgTable(
     status: bookingStatusEnum("status").notNull().default("PENDING_FACULTY"),
 
     createdAt: timestamp("created_at").notNull().defaultNow(),
+
+    bookingId: integer("booking_id").references(() => bookings.id, {
+      onDelete: "set null",
+    }),
+
+    rejectionReason: text("rejection_reason"),
+
+    internalNote: text("internal_note"),
+
+    decidedAt: timestamp("decided_at"),
   },
   (table) => ({
     userIdIdx: index("booking_requests_user_id_idx").on(table.userId),
@@ -383,6 +519,51 @@ export const bookingRequests = pgTable(
     participantCountPositiveCheck: check(
       "booking_requests_participant_count_positive_check",
       sql`${table.participantCount} IS NULL OR ${table.participantCount} > 0`,
+    ),
+  }),
+);
+
+export const bookingEditRequests = pgTable(
+  "booking_edit_requests",
+  {
+    id: serial("id").primaryKey(),
+
+    bookingId: integer("booking_id")
+      .notNull()
+      .references(() => bookings.id, { onDelete: "cascade" }),
+
+    proposedRoomId: integer("proposed_room_id").references(() => rooms.id, {
+      onDelete: "set null",
+    }),
+
+    proposedStartAt: timestamp("proposed_start_at", { withTimezone: false }),
+    proposedEndAt: timestamp("proposed_end_at", { withTimezone: false }),
+
+    status: bookingEditRequestStatusEnum("status").notNull().default("PENDING"),
+
+    requestedBy: integer("requested_by")
+      .notNull()
+      .references(() => users.id),
+
+    reviewedBy: integer("reviewed_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+
+    createdAt: timestamp("created_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp("updated_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    bookingIdIdx: index("booking_edit_requests_booking_id_idx").on(table.bookingId),
+    statusIdx: index("booking_edit_requests_status_idx").on(table.status),
+    requestedByIdx: index("booking_edit_requests_requested_by_idx").on(table.requestedBy),
+    proposedFieldsPresentCheck: check(
+      "booking_edit_requests_proposed_fields_present_check",
+      sql`${table.proposedRoomId} IS NOT NULL OR ${table.proposedStartAt} IS NOT NULL OR ${table.proposedEndAt} IS NOT NULL`,
     ),
   }),
 );
@@ -442,12 +623,21 @@ export const users = pgTable(
   }),
 );
 
+// Deprecated: Slot/Venue change system removed
+// retained only for backward compatibility
+// not used in current system
 export const notificationTypeEnum = pgEnum("notification_type", [
   "BOOKING_REQUEST_CREATED",
   "BOOKING_REQUEST_FORWARDED",
   "BOOKING_REQUEST_APPROVED",
   "BOOKING_REQUEST_REJECTED",
   "BOOKING_REQUEST_CANCELLED",
+  "SLOT_CHANGE_REQUESTED",
+  "SLOT_CHANGE_APPROVED",
+  "SLOT_CHANGE_REJECTED",
+  "VENUE_CHANGE_REQUESTED",
+  "VENUE_CHANGE_APPROVED",
+  "VENUE_CHANGE_REJECTED",
 ]);
 
 export const notifications = pgTable(
@@ -597,70 +787,25 @@ export const bookingCourseLink = pgTable(
   }),
 );
 
-export const slotChangeRequestStatusEnum = pgEnum("slot_change_request_status", [
-  "PENDING",
-  "APPROVED",
-  "REJECTED",
-  "CANCELLED",
-]);
-
-export const slotChangeRequests = pgTable(
-  "slot_change_requests",
+// Session store table (created by connect-pg-simple)
+export const userSessions = pgTable(
+  "user_sessions",
   {
-    id: serial("id").primaryKey(),
-    requestedBy: integer("requested_by")
-      .notNull()
-      .references(() => users.id),
-    courseId: integer("course_id")
-      .notNull()
-      .references(() => courses.id, { onDelete: "cascade" }),
-    currentBookingId: integer("current_booking_id")
-      .notNull()
-      .references(() => bookings.id, { onDelete: "cascade" }),
-    proposedRoomId: integer("proposed_room_id").references(() => rooms.id, {
-      onDelete: "set null",
-    }),
-    proposedStart: timestamp("proposed_start", { withTimezone: true }).notNull(),
-    proposedEnd: timestamp("proposed_end", { withTimezone: true }).notNull(),
-    reason: text("reason").notNull(),
-    status: slotChangeRequestStatusEnum("status").notNull().default("PENDING"),
-    reviewedBy: integer("reviewed_by").references(() => users.id, {
-      onDelete: "set null",
-    }),
-    reviewNote: text("review_note"),
-    createdAt: timestamp("created_at", { withTimezone: false })
-      .notNull()
-      .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: false })
-      .notNull()
-      .defaultNow(),
+    sid: varchar("sid").primaryKey(),
+    sess: json("sess").$type<{
+      cookie: {
+        originalMaxAge: number;
+        expires: string;
+        httpOnly: boolean;
+        path: string;
+      };
+      passport?: { user: number };
+    }>().notNull(),
+    expire: timestamp("expire", { precision: 6, withTimezone: false }).notNull(),
   },
   (table) => ({
-    requestedByIdx: index("slot_change_requests_requested_by_idx").on(
-      table.requestedBy,
-    ),
-    courseIdIdx: index("slot_change_requests_course_id_idx").on(table.courseId),
-    currentBookingIdIdx: index("slot_change_requests_current_booking_id_idx").on(
-      table.currentBookingId,
-    ),
-    proposedRoomIdIdx: index("slot_change_requests_proposed_room_id_idx").on(
-      table.proposedRoomId,
-    ),
-    reviewedByIdx: index("slot_change_requests_reviewed_by_idx").on(
-      table.reviewedBy,
-    ),
-    statusIdx: index("slot_change_requests_status_idx").on(table.status),
-    proposedStartIdx: index("slot_change_requests_proposed_start_idx").on(
-      table.proposedStart,
-    ),
-    proposedEndIdx: index("slot_change_requests_proposed_end_idx").on(
-      table.proposedEnd,
-    ),
-    proposedRangeCheck: check(
-      "slot_change_requests_valid_proposed_range_check",
-      sql`${table.proposedEnd} > ${table.proposedStart}`,
-    ),
-  }),
+    expireIdx: index("IDX_session_expire").on(table.expire),
+  })
 );
 
 export * from "../modules/timetable/schema";

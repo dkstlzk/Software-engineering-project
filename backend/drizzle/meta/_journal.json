@@ -155,6 +155,48 @@
       "when": 1775215004464,
       "tag": "0021_curved_black_panther",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1775374917267,
+      "tag": "0022_deep_johnny_blaze",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1775390538123,
+      "tag": "0023_steep_pete_wisdom",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1775683726264,
+      "tag": "0024_gorgeous_cammi",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1775838600000,
+      "tag": "0026_timetable_commit_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1775842200000,
+      "tag": "0027_edit_mode_snapshot_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1775906500000,
+      "tag": "0028_edit_booking_requests_core",
+      "breakpoints": true
     }
   ]
 }

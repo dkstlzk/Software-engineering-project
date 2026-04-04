@@ -1,0 +1,2 @@
+ALTER TABLE "timetable_import_batches" ADD COLUMN "auxiliary_headers" jsonb DEFAULT '[]'::jsonb NOT NULL;--> statement-breakpoint
+ALTER TABLE "timetable_import_rows" ADD COLUMN "auxiliary_data" jsonb DEFAULT '{}'::jsonb NOT NULL;
