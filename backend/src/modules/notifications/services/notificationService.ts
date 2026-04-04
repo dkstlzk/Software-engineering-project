@@ -1,10 +1,11 @@
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import { and, eq, inArray } from "drizzle-orm";
-import type { UserRole } from "../auth/jwt";
-import { env } from "../config/env";
-import { db } from "../db";
-import { notifications, staffBuildingAssignments, users } from "../db/schema";
+import type { UserRole } from "../../../auth/jwt";
+import { env } from "../../../config/env";
+import { db } from "../../../db";
+import { notifications, staffBuildingAssignments, users } from "../../../db/schema";
+import logger from "../../../shared/utils/logger";
 
 type DbExecutor = typeof db | any;
 
@@ -15,6 +16,8 @@ export type NotificationDraft = {
   subject: string;
   message: string;
   type: NotificationType;
+  /** If true, skip email even if recipient role normally receives email */
+  skipEmail?: boolean;
 };
 
 type ActiveRecipient = {
@@ -82,9 +85,23 @@ function normalizeDrafts(drafts: NotificationDraft[]): NotificationDraft[] {
       subject,
       message,
       type: draft.type,
+      ...(draft.skipEmail ? { skipEmail: true } : {}),
     };
 
     const dedupeKey = `${normalizedDraft.recipientId}|${normalizedDraft.type}|${normalizedDraft.subject}|${normalizedDraft.message}`;
+
+    const existingDraft = deduped.get(dedupeKey);
+
+    if (existingDraft) {
+      deduped.set(dedupeKey, {
+        ...normalizedDraft,
+        ...(existingDraft.skipEmail || normalizedDraft.skipEmail
+          ? { skipEmail: true }
+          : {}),
+      });
+      continue;
+    }
+
     deduped.set(dedupeKey, normalizedDraft);
   }
 
@@ -115,6 +132,10 @@ async function sendEmailNotification(
   recipient: ActiveRecipient,
   draft: NotificationDraft,
 ): Promise<boolean> {
+  if (draft.skipEmail) {
+    return false;
+  }
+
   if (!shouldSendEmailForRole(recipient.role)) {
     return false;
   }
@@ -133,7 +154,7 @@ async function sendEmailNotification(
 
     return true;
   } catch (error) {
-    console.error("Failed to send notification email", {
+    logger.error("Failed to send notification email", {
       recipientId: recipient.id,
       role: recipient.role,
       error,

@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
-import { db } from "../db";
-import { rooms, staffBuildingAssignments } from "../db/schema";
+import { db } from "../../../db";
+import { rooms, staffBuildingAssignments } from "../../../db/schema";
 
 type DbExecutor = typeof db | any;
 
