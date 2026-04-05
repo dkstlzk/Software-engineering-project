@@ -6,15 +6,15 @@ import session from "express-session";
 import passport from "./auth/passport";
 import { env } from "./config/env";
 import { pool } from "./db";
-import buildingsRouter from "./routes/buildings";
-import roomsRouter from "./routes/rooms";
-import bookingsRouter from "./routes/bookings";
-import bookingRequestsRouter from "./routes/bookingRequests";
-import availabilityRoutes from './routes/availability';
-import authRoutes from "./routes/auth";
-import usersRoutes from "./routes/users";
-import notificationsRoutes from "./routes/notifications";
-import timetableRoutes from "./modules/timetable/routes";
+import { generalLimiter, authLimiter } from "./api/middleware/rateLimit.middleware";
+import { markInternalOperation } from "./api/middleware/internalOperation.middleware";
+import { requestLogger } from "./api/middleware/requestLogger.middleware";
+import { performanceMiddleware } from "./api/middleware/performance.middleware";
+import healthRouter from "./api/routes/health.routes";
+import { errorHandler } from "./api/middleware/errorHandler.middleware";
+import { apiModules } from "./modules";
+import { registerModules } from "./modules/registerModules";
+import logger from "./shared/utils/logger";
 
 
 const app = express();
@@ -47,21 +47,28 @@ app.use(passport.session());
 
 app.use(express.json());
 
-// routes
-app.use("/buildings", buildingsRouter);
-app.use("/rooms", roomsRouter);
-app.use("/bookings", bookingsRouter);
-app.use("/booking-requests", bookingRequestsRouter);
-app.use('/availability', availabilityRoutes);
-app.use("/auth", authRoutes);
-app.use("/api/auth", authRoutes);
-app.use("/users", usersRoutes);
-app.use("/api/users", usersRoutes);
-app.use("/notifications", notificationsRoutes);
-app.use("/api/notifications", notificationsRoutes);
-app.use("/timetable", timetableRoutes);
-app.use("/api/timetable", timetableRoutes);
+// Performance middleware - track response times
+app.use(performanceMiddleware);
+
+// Request logger middleware
+app.use(requestLogger);
+
+// Mark internal operations before rate limiting
+app.use(markInternalOperation);
+
+// Apply rate limiters
+app.use("/api", generalLimiter);
+app.use("/api/auth", authLimiter);
+
+// Feature modules
+registerModules(app, apiModules);
+
+// Infra routes (outside /api)
+app.use("/health", healthRouter);
+
+// Global error handler - must be after all routes
+app.use(errorHandler);
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  logger.info(`Server running on port ${PORT}`);
 });
