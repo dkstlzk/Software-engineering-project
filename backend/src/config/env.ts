@@ -59,9 +59,25 @@ function optionalBooleanEnv(name: string): boolean | null {
 	return null;
 }
 
+function readPort(): number {
+	const raw = process.env.PORT?.trim();
+
+	if (!raw) {
+		return 5000;
+	}
+
+	const parsed = Number(raw);
+
+	if (!Number.isInteger(parsed) || parsed <= 0) {
+		return 5000;
+	}
+
+	return parsed;
+}
+
 export const env = {
 	NODE_ENV: process.env.NODE_ENV ?? "development",
-	PORT: Number(process.env.PORT ?? "5000"),
+	PORT: readPort(),
 	DATABASE_URL: requireEnv("DATABASE_URL"),
 	JWT_SECRET: requireEnv("JWT_SECRET"),
 	GOOGLE_CLIENT_ID: optionalEnv("GOOGLE_CLIENT_ID"),

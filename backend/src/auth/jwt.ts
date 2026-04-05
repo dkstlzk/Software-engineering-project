@@ -16,6 +16,12 @@ export type SetupTokenPayload = {
   setupRequired: true;
 };
 
+export type AuthTokenPayload = {
+  id: number;
+  role: LoginRole;
+  type: "access" | "refresh";
+};
+
 function isSetupTokenPayload(payload: unknown): payload is SetupTokenPayload {
   if (!payload || typeof payload !== "object") {
     return false;
@@ -39,10 +45,59 @@ export function signAuthToken(user: { id: number; role: UserRole }): string {
     {
       id: user.id,
       role: user.role,
+      type: "access",
     },
     env.JWT_SECRET,
-    { expiresIn: "1d" },
+    { expiresIn: "15m" },
   );
+}
+
+export function signRefreshToken(user: { id: number; role: LoginRole }): string {
+  return jwt.sign(
+    {
+      id: user.id,
+      role: user.role,
+      type: "refresh",
+    },
+    env.JWT_SECRET,
+    { expiresIn: "7d" },
+  );
+}
+
+export function verifyAuthToken(token: string): AuthTokenPayload | null {
+  try {
+    const decoded = jwt.verify(token, env.JWT_SECRET) as any;
+
+    if (
+      typeof decoded.id === "number" &&
+      typeof decoded.role === "string" &&
+      decoded.type === "access"
+    ) {
+      return decoded as AuthTokenPayload;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function verifyRefreshToken(token: string): AuthTokenPayload | null {
+  try {
+    const decoded = jwt.verify(token, env.JWT_SECRET) as any;
+
+    if (
+      typeof decoded.id === "number" &&
+      typeof decoded.role === "string" &&
+      decoded.type === "refresh"
+    ) {
+      return decoded as AuthTokenPayload;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export function signSetupToken(userId: number): string {
