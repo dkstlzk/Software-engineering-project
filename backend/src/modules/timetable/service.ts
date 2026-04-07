@@ -32,7 +32,7 @@ const DEFAULT_TIME_BANDS: Array<{ startTime: string; endTime: string }> = [
   { startTime: "16:00", endTime: "17:00" },
 ];
 
-function createServiceError(status: number, message: string): TimetableServiceError {
+export function createServiceError(status: number, message: string): TimetableServiceError {
   const error = new Error(message) as TimetableServiceError;
   error.status = status;
   return error;
@@ -93,6 +93,48 @@ async function ensureSlotSystemExists(slotSystemId: number) {
   }
 
   return slotSystem;
+}
+
+async function ensureSlotSystemUnlocked(slotSystemId: number) {
+  const system = await ensureSlotSystemExists(slotSystemId);
+
+  if (system.isLocked) {
+    throw createServiceError(
+      403,
+      "Slot system is locked. Use the change workspace to modify a locked system.",
+    );
+  }
+
+  return system;
+}
+
+export async function lockSlotSystem(slotSystemId: number) {
+  const parsedId = toPositiveInteger(slotSystemId);
+
+  if (!parsedId) {
+    throw createServiceError(400, "Invalid slot system id");
+  }
+
+  const [updated] = await db
+    .update(slotSystems)
+    .set({ isLocked: true })
+    .where(eq(slotSystems.id, parsedId))
+    .returning();
+
+  if (!updated) {
+    throw createServiceError(404, "Slot system not found");
+  }
+
+  return updated;
+}
+
+export async function getSlotSystemLockStatus(slotSystemId: number) {
+  const system = await ensureSlotSystemExists(slotSystemId);
+
+  return {
+    slotSystemId: system.id,
+    isLocked: system.isLocked,
+  };
 }
 
 async function getNextDayOrderIndex(slotSystemId: number) {
@@ -244,6 +286,7 @@ export async function createDay(input: {
   slotSystemId: number;
   dayOfWeek: string;
   orderIndex?: number;
+  bypassLock?: boolean;
 }) {
   const slotSystemId = toPositiveInteger(input.slotSystemId);
 
@@ -264,7 +307,11 @@ export async function createDay(input: {
     throw createServiceError(400, "Invalid orderIndex");
   }
 
-  await ensureSlotSystemExists(slotSystemId);
+  if (input.bypassLock) {
+    await ensureSlotSystemExists(slotSystemId);
+  } else {
+    await ensureSlotSystemUnlocked(slotSystemId);
+  }
 
   try {
     const [day] = await db
@@ -305,7 +352,7 @@ export async function getDays(slotSystemId: number) {
     .orderBy(asc(slotDays.orderIndex));
 }
 
-export async function deleteDay(dayId: number) {
+export async function deleteDay(dayId: number, bypassLock = false) {
   const parsedId = toPositiveInteger(dayId);
 
   if (!parsedId) {
@@ -324,6 +371,10 @@ export async function deleteDay(dayId: number) {
 
   if (!existingDay) {
     throw createServiceError(404, "Day not found");
+  }
+
+  if (!bypassLock) {
+    await ensureSlotSystemUnlocked(existingDay.slotSystemId);
   }
 
   const [row] = await db
@@ -372,6 +423,7 @@ export async function createTimeBand(input: {
   startTime: string;
   endTime: string;
   orderIndex?: number;
+  bypassLock?: boolean;
 }) {
   const slotSystemId = toPositiveInteger(input.slotSystemId);
 
@@ -388,7 +440,11 @@ export async function createTimeBand(input: {
 
   validateTimeBandWindow(startTime, endTime);
 
-  await ensureSlotSystemExists(slotSystemId);
+  if (input.bypassLock) {
+    await ensureSlotSystemExists(slotSystemId);
+  } else {
+    await ensureSlotSystemUnlocked(slotSystemId);
+  }
   await assertNoTimeBandRangeOverlap({
     slotSystemId,
     startTime,
@@ -492,6 +548,7 @@ export async function updateTimeBand(input: {
   startTime?: string;
   endTime?: string;
   orderIndex?: number;
+  bypassLock?: boolean;
 }) {
   const timeBandId = toPositiveInteger(input.timeBandId);
 
@@ -507,6 +564,10 @@ export async function updateTimeBand(input: {
 
   if (!existingBand) {
     throw createServiceError(404, "Time band not found");
+  }
+
+  if (!input.bypassLock) {
+    await ensureSlotSystemUnlocked(existingBand.slotSystemId);
   }
 
   const hasTimePatch = input.startTime !== undefined || input.endTime !== undefined;
@@ -625,7 +686,7 @@ export async function updateTimeBand(input: {
   }
 }
 
-export async function deleteTimeBand(timeBandId: number) {
+export async function deleteTimeBand(timeBandId: number, bypassLock = false) {
   const parsedId = toPositiveInteger(timeBandId);
 
   if (!parsedId) {
@@ -644,6 +705,10 @@ export async function deleteTimeBand(timeBandId: number) {
 
   if (!existingBand) {
     throw createServiceError(404, "Time band not found");
+  }
+
+  if (!bypassLock) {
+    await ensureSlotSystemUnlocked(existingBand.slotSystemId);
   }
 
   const hasBlocks = await hasAnyBlocksInSlotSystem(existingBand.slotSystemId);
@@ -691,6 +756,7 @@ export async function createBlock(input: {
   laneIndex: number;
   rowSpan: number;
   label: string;
+  bypassLock?: boolean;
 }) {
   const slotSystemId = toPositiveInteger(input.slotSystemId);
   const dayId = toPositiveInteger(input.dayId);
@@ -723,7 +789,11 @@ export async function createBlock(input: {
     throw createServiceError(400, "label is required");
   }
 
-  await ensureSlotSystemExists(slotSystemId);
+  if (input.bypassLock) {
+    await ensureSlotSystemExists(slotSystemId);
+  } else {
+    await ensureSlotSystemUnlocked(slotSystemId);
+  }
 
   const [day] = await db
     .select({ id: slotDays.id, laneCount: slotDays.laneCount })
@@ -773,28 +843,49 @@ export async function createBlock(input: {
   }
 }
 
-export async function deleteBlock(blockId: number) {
+export async function deleteBlock(blockId: number, bypassLock = false) {
   const parsedId = toPositiveInteger(blockId);
 
   if (!parsedId) {
     throw createServiceError(400, "Invalid block id");
   }
 
-  const [deleted] = await db
-    .delete(slotBlocks)
+  const [existing] = await db
+    .select({ id: slotBlocks.id, slotSystemId: slotBlocks.slotSystemId })
+    .from(slotBlocks)
     .where(eq(slotBlocks.id, parsedId))
-    .returning();
+    .limit(1);
 
-  if (!deleted) {
+  if (!existing) {
     throw createServiceError(404, "Block not found");
   }
+
+  if (!bypassLock) {
+    await ensureSlotSystemUnlocked(existing.slotSystemId);
+  }
+
+  await db.delete(slotBlocks).where(eq(slotBlocks.id, parsedId));
 }
 
-export async function addDayLane(dayId: number) {
+export async function addDayLane(dayId: number, bypassLock = false) {
   const parsedId = toPositiveInteger(dayId);
 
   if (!parsedId) {
     throw createServiceError(400, "Invalid day id");
+  }
+
+  const [existingDay] = await db
+    .select({ id: slotDays.id, slotSystemId: slotDays.slotSystemId })
+    .from(slotDays)
+    .where(eq(slotDays.id, parsedId))
+    .limit(1);
+
+  if (!existingDay) {
+    throw createServiceError(404, "Day not found");
+  }
+
+  if (!bypassLock) {
+    await ensureSlotSystemUnlocked(existingDay.slotSystemId);
   }
 
   const [updated] = await db
@@ -977,7 +1068,7 @@ async function repackDayBlocksWithinLaneLimit(input: {
   }
 }
 
-export async function removeDayLane(dayId: number) {
+export async function removeDayLane(dayId: number, bypassLock = false) {
   const parsedId = toPositiveInteger(dayId);
 
   if (!parsedId) {
@@ -996,6 +1087,10 @@ export async function removeDayLane(dayId: number) {
 
   if (!day) {
     throw createServiceError(404, "Day not found");
+  }
+
+  if (!bypassLock) {
+    await ensureSlotSystemUnlocked(day.slotSystemId);
   }
 
   if (day.laneCount <= 1) {

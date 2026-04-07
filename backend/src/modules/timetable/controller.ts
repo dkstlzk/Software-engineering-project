@@ -27,7 +27,30 @@ import {
   reallocateTimetableImport,
   saveTimetableImportDecisions,
   transferTimetableImportRow,
+  detectCommitConflicts,
+  commitWithResolutions,
+  cancelCommit,
+  getCommitFreezeStatus,
 } from "./importService";
+import {
+  previewSlotSystemChanges,
+  applySlotSystemChanges,
+} from "./changeService";
+import {
+  cancelCommitSession,
+  finalizeCommitSession,
+  getCommitSessionStatus,
+  resolveExternalConflicts,
+  resolveInternalConflicts,
+  resolveRuntimeConflicts,
+  runExternalCheck,
+  runInternalCheck,
+  runRuntimeCheck,
+  startCommitSession,
+  startEditCommitSession,
+  startFrozenApply,
+} from "./timetableCommitEngine";
+import logger from "../../shared/utils/logger";
 
 function parsePositiveInteger(value: unknown): number | null {
   const parsed = Number(value);
@@ -48,7 +71,7 @@ function sendError(res: Response, error: unknown, fallbackMessage: string) {
     return res.status(status).json({ error: error.message });
   }
 
-  console.error(error);
+  logger.error(error);
   return res.status(500).json({ error: fallbackMessage });
 }
 
@@ -596,5 +619,486 @@ export async function handleGetProcessedImportRows(req: Request, res: Response) 
     return res.json(report);
   } catch (error) {
     return sendError(res, error, "Failed to fetch processed rows");
+  }
+}
+
+// ============================================================================
+// Conflict Detection and Resolution Handlers
+// ============================================================================
+
+/**
+ * Detect conflicts before committing.
+ * This freezes booking operations and returns any conflicts found.
+ */
+export async function handleDetectCommitConflicts(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    // Use a simple identifier for the freeze info
+    const userName = `User ${userId}`;
+
+    logger.info("Handling detect commit conflicts request", { batchId, userId });
+
+    const report = await detectCommitConflicts(
+      { batchId, decisions: req.body?.decisions },
+      userId,
+      userName
+    );
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to detect commit conflicts");
+  }
+}
+
+/**
+ * Commit with conflict resolutions.
+ * Applies resolution decisions and creates/deletes bookings accordingly.
+ */
+export async function handleCommitWithResolutions(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    const resolutions = req.body?.resolutions;
+
+    if (!Array.isArray(resolutions)) {
+      return res.status(400).json({ error: "resolutions must be an array" });
+    }
+
+    logger.info("Handling commit with resolutions request", {
+      batchId,
+      userId,
+      resolutionCount: resolutions.length,
+    });
+
+    const report = await commitWithResolutions({ batchId, resolutions }, userId);
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to commit with resolutions");
+  }
+}
+
+/**
+ * Cancel a commit in progress.
+ * Unfreezes booking operations without making changes.
+ */
+export async function handleCancelCommit(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    logger.info("Handling cancel commit request", { batchId });
+
+    const result = await cancelCommit(batchId);
+
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, "Failed to cancel commit");
+  }
+}
+
+/**
+ * Get freeze status for a batch.
+ */
+export async function handleGetFreezeStatus(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.params.id);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "Invalid batch id" });
+    }
+
+    const status = getCommitFreezeStatus(batchId);
+
+    return res.json(status);
+  } catch (error) {
+    return sendError(res, error, "Failed to get freeze status");
+  }
+}
+
+// ============================================================================
+// New 3-Stage Commit Session Handlers
+// ============================================================================
+
+export async function handleStartCommitSession(req: Request, res: Response) {
+  try {
+    const batchId = parsePositiveInteger(req.body?.batchId);
+
+    if (!batchId) {
+      return res.status(400).json({ error: "batchId is required" });
+    }
+
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    const session = await startCommitSession({
+      batchId,
+      userId,
+      decisions: req.body?.decisions,
+    });
+
+    return res.status(201).json(session);
+  } catch (error) {
+    return sendError(res, error, "Failed to start commit session");
+  }
+}
+
+export async function handleStartEditCommitSession(req: Request, res: Response) {
+  try {
+    const slotSystemId = parsePositiveInteger(req.body?.slotSystemId);
+    const expectedVersion = Number(req.body?.expectedVersion);
+
+    if (!slotSystemId) {
+      return res.status(400).json({ error: "slotSystemId is required" });
+    }
+
+    if (!Number.isInteger(expectedVersion) || expectedVersion <= 0) {
+      return res.status(400).json({ error: "expectedVersion must be a positive integer" });
+    }
+
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    try {
+      const result = await startEditCommitSession({
+        slotSystemId,
+        expectedVersion,
+        newState: req.body?.newState,
+        pruneBookings: req.body?.pruneBookings === true,
+        userId,
+      });
+
+      if (result.noChanges === true) {
+        return res.status(200).json(result);
+      }
+
+      return res.status(201).json(result);
+    } catch (startEditError) {
+      // Handle specific error codes
+      if (startEditError instanceof Error) {
+        if (
+          startEditError.message.includes("Version mismatch") ||
+          startEditError.message.includes("Expected")
+        ) {
+          return res.status(409).json({
+            code: "VERSION_CONFLICT",
+            error: "Timetable updated by another user. Please reload.",
+            message: startEditError.message,
+          });
+        }
+
+        if (startEditError.message.includes("No changes detected")) {
+          return res.status(200).json({
+            code: "NO_CHANGES",
+            error: "No changes detected",
+            message: startEditError.message,
+          });
+        }
+      }
+
+      return sendError(res, startEditError, "Failed to start edit commit session");
+    }
+  } catch (error) {
+    return sendError(res, error, "Failed to start edit commit session");
+  }
+}
+
+export async function handleExternalCommitCheck(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const report = await runExternalCheck(commitSessionId);
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to run external conflict check");
+  }
+}
+
+export async function handleExternalCommitResolve(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const resolutions = req.body?.resolutions;
+
+    if (!Array.isArray(resolutions)) {
+      return res.status(400).json({ error: "resolutions must be an array" });
+    }
+
+    const session = await resolveExternalConflicts({
+      commitSessionId,
+      resolutions,
+    });
+
+    return res.json(session);
+  } catch (error) {
+    return sendError(res, error, "Failed to resolve external conflicts");
+  }
+}
+
+export async function handleInternalCommitCheck(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const report = await runInternalCheck(commitSessionId);
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to run internal conflict check");
+  }
+}
+
+export async function handleInternalCommitResolve(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const resolutions = req.body?.resolutions;
+
+    if (!Array.isArray(resolutions)) {
+      return res.status(400).json({ error: "resolutions must be an array" });
+    }
+
+    const session = await resolveInternalConflicts({
+      commitSessionId,
+      resolutions,
+    });
+
+    return res.json(session);
+  } catch (error) {
+    return sendError(res, error, "Failed to resolve internal conflicts");
+  }
+}
+
+export async function handleStartCommitFreeze(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    const userName = `User ${userId}`;
+
+    const session = await startFrozenApply({
+      commitSessionId,
+      userId,
+      userName,
+    });
+
+    return res.json(session);
+  } catch (error) {
+    return sendError(res, error, "Failed to acquire booking freeze");
+  }
+}
+
+export async function handleRuntimeCommitCheck(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const report = await runRuntimeCheck(commitSessionId);
+
+    return res.json(report);
+  } catch (error) {
+    return sendError(res, error, "Failed to run runtime conflict check");
+  }
+}
+
+export async function handleRuntimeCommitResolve(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const resolutions = req.body?.resolutions;
+
+    if (!Array.isArray(resolutions)) {
+      return res.status(400).json({ error: "resolutions must be an array" });
+    }
+
+    const session = await resolveRuntimeConflicts({
+      commitSessionId,
+      resolutions,
+    });
+
+    return res.json(session);
+  } catch (error) {
+    return sendError(res, error, "Failed to resolve runtime conflicts");
+  }
+}
+
+export async function handleFinalizeCommitSession(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    const result = await finalizeCommitSession({
+      commitSessionId,
+      userId,
+    });
+
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, "Failed to finalize commit session");
+  }
+}
+
+export async function handleCancelCommitSession(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.body?.commitSessionId);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "commitSessionId is required" });
+    }
+
+    const result = await cancelCommitSession(commitSessionId);
+
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, "Failed to cancel commit session");
+  }
+}
+
+export async function handleGetCommitSessionStatus(req: Request, res: Response) {
+  try {
+    const commitSessionId = parsePositiveInteger(req.params.id);
+
+    if (!commitSessionId) {
+      return res.status(400).json({ error: "Invalid commit session id" });
+    }
+
+    const session = await getCommitSessionStatus(commitSessionId);
+
+    return res.json(session);
+  } catch (error) {
+    return sendError(res, error, "Failed to fetch commit session status");
+  }
+}
+
+/**
+ * Preview structural changes to a slot system.
+ */
+export async function handlePreviewSlotSystemChanges(req: Request, res: Response) {
+  try {
+    const slotSystemId = parsePositiveInteger(req.params.id);
+
+    if (!slotSystemId) {
+      return res.status(400).json({ error: "Invalid slot system id" });
+    }
+
+    const changes = req.body?.changes;
+
+    if (!changes || typeof changes !== "object") {
+      return res.status(400).json({ error: "changes object is required" });
+    }
+
+    const result = await previewSlotSystemChanges({ slotSystemId, changes });
+
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, "Failed to preview slot system changes");
+  }
+}
+
+/**
+ * Apply structural changes to a slot system.
+ */
+export async function handleApplySlotSystemChanges(req: Request, res: Response) {
+  try {
+    const slotSystemId = parsePositiveInteger(req.params.id);
+
+    if (!slotSystemId) {
+      return res.status(400).json({ error: "Invalid slot system id" });
+    }
+
+    const userId = (req as Request & { user?: { id: number } }).user?.id;
+    const userName = (req as Request & { user?: { name: string } }).user?.name ?? "Admin";
+
+    if (!userId) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    const changes = req.body?.changes;
+
+    if (!changes || typeof changes !== "object") {
+      return res.status(400).json({ error: "changes object is required" });
+    }
+
+    logger.info("Handling apply slot system changes request", {
+      slotSystemId,
+      userId,
+    });
+
+    const result = await applySlotSystemChanges({ slotSystemId, changes }, userId, userName);
+
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, "Failed to apply slot system changes");
   }
 }

@@ -7,7 +7,10 @@ import {
   time,
   pgEnum,
   uniqueIndex,
+  boolean,
+  jsonb,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const DAY_OF_WEEK_VALUES = [
   "MON",
@@ -22,6 +25,12 @@ export const DAY_OF_WEEK_VALUES = [
 export const slotSystems = pgTable("slot_systems", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
+  isLocked: boolean("is_locked").notNull().default(false),
+  committedSnapshotJson: jsonb("committed_snapshot_json")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
+  version: integer("version").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
