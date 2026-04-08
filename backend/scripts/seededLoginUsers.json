@@ -1,0 +1,71 @@
+{
+  "defaultPassword": "password123",
+  "users": [
+    {
+      "key": "admin",
+      "name": "Admin User",
+      "email": "admin@iitj.ac.in",
+      "role": "ADMIN",
+      "department": "Administration"
+    },
+    {
+      "key": "staffOps",
+      "name": "Operations Staff",
+      "email": "staff.ops@iitj.ac.in",
+      "role": "STAFF",
+      "department": "Campus Operations",
+      "assignedBuildings": [
+        "Academic Block A",
+        "Lecture Hall Complex",
+        "Innovation Center"
+      ]
+    },
+    {
+      "key": "staffFacilities",
+      "name": "Facilities Staff",
+      "email": "staff.facilities@iitj.ac.in",
+      "role": "STAFF",
+      "department": "Facilities",
+      "assignedBuildings": [
+        "Academic Block A",
+        "Lecture Hall Complex",
+        "Innovation Center"
+      ]
+    },
+    {
+      "key": "facultyCs",
+      "name": "Faculty CS",
+      "email": "faculty.cs@iitj.ac.in",
+      "role": "FACULTY",
+      "department": "Computer Science"
+    },
+    {
+      "key": "facultyEe",
+      "name": "Faculty EE",
+      "email": "faculty.ee@iitj.ac.in",
+      "role": "FACULTY",
+      "department": "Electrical Engineering"
+    },
+    {
+      "key": "studentAlice",
+      "name": "Student Alice",
+      "email": "student.alice@iitj.ac.in",
+      "role": "STUDENT",
+      "department": "Computer Science"
+    },
+    {
+      "key": "studentBob",
+      "name": "Student Bob",
+      "email": "student.bob@iitj.ac.in",
+      "role": "STUDENT",
+      "department": "Electrical Engineering"
+    },
+    {
+      "key": "studentCharlie",
+      "name": "Student Charlie",
+      "email": "student.charlie@iitj.ac.in",
+      "role": "STUDENT",
+      "department": "Mechanical Engineering"
+    }
+  ]
+}
