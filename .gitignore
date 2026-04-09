@@ -59,3 +59,8 @@ backend/drizzle/*.sqlite
 coverage/
 .tmp/
 node_modules/
+
+docs/
+
+Assignment 1.pdf
+assignment1.tex

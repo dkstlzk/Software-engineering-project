@@ -11,6 +11,78 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ura_user -d ura_system"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    container_name: ura_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  backend-schema-sync:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: migrator
+    container_name: ura_backend_schema_sync
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://ura_user:ura_pass@db:5432/ura_system
+    command: ["npm", "run", "db:push:first-deploy"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: ura_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend-schema-sync:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: postgres://ura_user:ura_pass@db:5432/ura_system
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change_me_before_production}
+      SESSION_SECRET: ${SESSION_SECRET:-change_me_before_production}
+      FRONTEND_URL: http://localhost:5173
+      GOOGLE_CALLBACK_URL: http://localhost:5000/api/auth/google/callback
+    ports:
+      - "5000:5000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: ura_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
 
 volumes:
   pgdata:
+  redisdata:
