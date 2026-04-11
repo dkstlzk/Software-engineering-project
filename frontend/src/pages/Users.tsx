@@ -1,205 +1,80 @@
 import { useEffect, useState } from "react";
-import type { FormEvent } from "react";
-import {
-  createManagedUser,
-  deleteManagedUser,
-  getBuildings,
-  getManagedUsers,
-  updateManagedUserActiveStatus,
-  updateUserBuildingAssignments,
-  updateManagedUserRole,
-} from "../api/api";
-import type {
-  AssignableUserRole,
-  Building,
-  ManagedUser,
-  UserRole,
-} from "../api/api";
+import { createManagedUser, deleteManagedUser, getManagedUsers, updateManagedUserActiveStatus, updateManagedUserRole } from "../lib/api";
+import type { AssignableUserRole, ManagedUser, UserRole } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
-import { formatDateDDMMYYYY } from "../utils/datetime";
+import { Button } from "../components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogHeader, AlertDialogTitle } from "../components/ui/alert-dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { Input } from "../components/ui/input";
+import { Badge } from "../components/ui/badge";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { BuildingAssignmentDialog } from "./components/BuildingAssignmentDialog";
+import { formatError } from "../utils/formatError";
 
 type RoleFilter = "ALL" | UserRole;
-type ActiveFilter = "ALL" | "ACTIVE" | "INACTIVE";
-type CreateAuthProvider = "email" | "google";
+const PAGE_SIZES = [10, 20, 50];
+const ROLE_OPTIONS: AssignableUserRole[] = ["ADMIN", "STAFF", "FACULTY", "STUDENT"];
+const ROLE_LABELS: Record<UserRole, string> = { ADMIN: "Admin", STAFF: "Staff", FACULTY: "Faculty", STUDENT: "Student", PENDING_ROLE: "Pending Role" };
 
-const PAGE_SIZE = 20;
-
-const ROLE_FILTER_OPTIONS: RoleFilter[] = [
-  "ALL",
-  "ADMIN",
-  "STAFF",
-  "FACULTY",
-  "STUDENT",
-  "PENDING_ROLE",
-];
-
-const ASSIGNABLE_ROLE_OPTIONS: AssignableUserRole[] = [
-  "ADMIN",
-  "STAFF",
-  "FACULTY",
-  "STUDENT",
-];
-
-const ADMIN_CREATE_ROLE_OPTIONS: Array<"ADMIN" | "STAFF"> = ["ADMIN", "STAFF"];
-const GOOGLE_CREATE_ROLE_OPTIONS: Array<"ADMIN" | "STAFF" | "FACULTY"> = [
-  "FACULTY",
-  "STAFF",
-  "ADMIN",
-];
-
-const ROLE_LABELS: Record<UserRole, string> = {
-  ADMIN: "Admin",
-  STAFF: "Staff",
-  FACULTY: "Faculty",
-  STUDENT: "Student",
-  PENDING_ROLE: "Pending Role",
-};
-
-function getUserDisplayName(user: ManagedUser): string {
-  const displayName = user.displayName?.trim();
-  return displayName && displayName.length > 0 ? displayName : user.name;
+function getUserDisplayName(user: ManagedUser) {
+  return user.displayName?.trim() || user.name;
 }
 
-function isAssignableRole(role: UserRole): role is AssignableUserRole {
-  return role !== "PENDING_ROLE";
-}
-
-function roleBadgeClass(role: UserRole): string {
-  if (role === "ADMIN") return "badge badge--danger";
-  if (role === "STAFF") return "badge badge--info";
-  if (role === "FACULTY") return "badge badge--warning";
-  if (role === "STUDENT") return "badge badge--success";
-  return "badge badge--muted";
+function roleBadgeVariant(role: UserRole) {
+  const map: Record<UserRole, "default" | "destructive" | "secondary" | "outline"> = {
+    ADMIN: "destructive", STAFF: "default", FACULTY: "secondary", STUDENT: "outline", PENDING_ROLE: "outline",
+  };
+  return map[role];
 }
 
 export function UsersPage() {
-  const { user } = useAuth();
-
-  const [rows, setRows] = useState<ManagedUser[]>([]);
-  const [allBuildings, setAllBuildings] = useState<Building[]>([]);
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(0);
-  const [totalUsers, setTotalUsers] = useState(0);
-
+  const { user: authUser } = useAuth();
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [{ page, pageSize, totalPages, totalUsers }, setPagination] = useState({ page: 1, pageSize: 20, totalPages: 0, totalUsers: 0 });
+  const [filters, setFilters] = useState({ search: "", role: "ALL" as RoleFilter, status: "ALL" as "ALL" | "ACTIVE" | "INACTIVE", department: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-
-  const [search, setSearch] = useState("");
-  const [department, setDepartment] = useState("");
-  const [roleFilter, setRoleFilter] = useState<RoleFilter>("ALL");
-  const [activeFilter, setActiveFilter] = useState<ActiveFilter>("ALL");
-
-  const [newName, setNewName] = useState("");
-  const [newEmail, setNewEmail] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [newAuthProvider, setNewAuthProvider] = useState<CreateAuthProvider>("google");
-  const [newRole, setNewRole] = useState<"ADMIN" | "STAFF" | "FACULTY">("FACULTY");
-  const [newDepartment, setNewDepartment] = useState("");
-
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [creatingUser, setCreatingUser] = useState(false);
-  const [actingRoleUserId, setActingRoleUserId] = useState<number | null>(null);
-  const [actingAssignmentUserId, setActingAssignmentUserId] = useState<number | null>(null);
-  const [actingActiveUserId, setActingActiveUserId] = useState<number | null>(null);
-  const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
-  const [roleDraftByUserId, setRoleDraftByUserId] = useState<Record<number, AssignableUserRole>>({});
-  const [assignedBuildingDraftByUserId, setAssignedBuildingDraftByUserId] = useState<Record<number, number[]>>({});
+  const [createForm, setCreateForm] = useState({ name: "", email: "", password: "", role: "FACULTY" as "ADMIN" | "STAFF" | "FACULTY", department: "", authProvider: "email" as "email" | "google" });
+  const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
+  const [deactivatingUser, setDeactivatingUser] = useState<ManagedUser | null>(null);
+  const [deletingUser, setDeletingUser] = useState<ManagedUser | null>(null);
+  const [bulkActionMode, setBulkActionMode] = useState<"activate" | "deactivate" | "role" | null>(null);
+  const [bulkRole, setBulkRole] = useState<AssignableUserRole>("FACULTY");
+  const [managingBuildingsUser, setManagingBuildingsUser] = useState<ManagedUser | null>(null);
 
-  const loadUsers = async (
-    targetPage = 1,
-    overrides?: Partial<{
-      search: string;
-      department: string;
-      roleFilter: RoleFilter;
-      activeFilter: ActiveFilter;
-    }>,
-  ) => {
-    const resolvedSearch = (overrides?.search ?? search).trim();
-    const resolvedDepartment = (overrides?.department ?? department).trim();
-    const resolvedRoleFilter = overrides?.roleFilter ?? roleFilter;
-    const resolvedActiveFilter = overrides?.activeFilter ?? activeFilter;
-
+  const loadUsers = async (targetPage = 1) => {
     setLoading(true);
     setError(null);
-
     try {
       const response = await getManagedUsers({
         page: targetPage,
-        limit: PAGE_SIZE,
-        ...(resolvedRoleFilter !== "ALL" ? { role: resolvedRoleFilter } : {}),
-        ...(resolvedDepartment ? { department: resolvedDepartment } : {}),
-        ...(resolvedSearch ? { search: resolvedSearch } : {}),
-        ...(resolvedActiveFilter === "ACTIVE"
-          ? { isActive: true }
-          : resolvedActiveFilter === "INACTIVE"
-            ? { isActive: false }
-            : {}),
+        limit: pageSize,
+        ...(filters.search && { search: filters.search }),
+        ...(filters.role !== "ALL" && { role: filters.role }),
+        ...(filters.status === "ACTIVE" && { isActive: true }),
+        ...(filters.status === "INACTIVE" && { isActive: false }),
+        ...(filters.department && { department: filters.department }),
       });
-
-      setRows(response.data);
-      setPage(response.pagination.page);
-      setTotalPages(response.pagination.totalPages);
-      setTotalUsers(response.pagination.total);
-
-      setRoleDraftByUserId((previousDrafts) => {
-        const nextDrafts = { ...previousDrafts };
-
-        for (const managedUser of response.data) {
-          if (nextDrafts[managedUser.id]) {
-            continue;
-          }
-
-          if (isAssignableRole(managedUser.role)) {
-            nextDrafts[managedUser.id] = managedUser.role;
-          } else {
-            nextDrafts[managedUser.id] = "STUDENT";
-          }
-        }
-
-        return nextDrafts;
-      });
-
-      setAssignedBuildingDraftByUserId(() => {
-        const nextDrafts: Record<number, number[]> = {};
-
-        for (const managedUser of response.data) {
-          if (managedUser.role !== "STAFF") {
-            continue;
-          }
-
-          nextDrafts[managedUser.id] = managedUser.assignedBuildings.map(
-            (building) => building.id,
-          );
-        }
-
-        return nextDrafts;
-      });
+      setUsers(response.data);
+      setPagination({ page: response.pagination.page, pageSize, totalPages: response.pagination.totalPages, totalUsers: response.pagination.total });
+      setSelectedIds(new Set());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load users");
+      setError(formatError(e, "Failed to load users"));
     } finally {
       setLoading(false);
     }
   };
 
-  const loadBuildings = async () => {
-    try {
-      setAllBuildings(await getBuildings());
-    } catch {
-      setAllBuildings([]);
-    }
-  };
-
   useEffect(() => {
-    if (user?.role !== "ADMIN") {
-      return;
-    }
-
+    if (authUser?.role !== "ADMIN") return;
     void loadUsers(1);
-    void loadBuildings();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role]);
+  }, [authUser?.role]); // eslint-disable-next-line react-hooks/exhaustive-deps
 
-  if (user?.role !== "ADMIN") {
+  if (authUser?.role !== "ADMIN") {
     return (
       <section>
         <div className="page-header">
@@ -211,605 +86,418 @@ export function UsersPage() {
     );
   }
 
-  const handleApplyFilters = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void loadUsers(1);
-  };
-
-  const handleResetFilters = () => {
-    setSearch("");
-    setDepartment("");
-    setRoleFilter("ALL");
-    setActiveFilter("ALL");
-    void loadUsers(1, {
-      search: "",
-      department: "",
-      roleFilter: "ALL",
-      activeFilter: "ALL",
-    });
-  };
-
-  const handleCreateUser = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    const trimmedName = newName.trim();
-    const trimmedEmail = newEmail.trim().toLowerCase();
-    const trimmedDepartment = newDepartment.trim();
-
-    if (!trimmedEmail) {
-      setError("Email is required");
-      return;
-    }
-
-    if (newAuthProvider === "email") {
-      if (!trimmedName || !newPassword) {
-        setError("Name, email and password are required for email/password accounts");
-        return;
-      }
-
-      if (newPassword.length < 8) {
-        setError("Password must be at least 8 characters");
-        return;
-      }
-
-      if (newRole === "FACULTY") {
-        setError("Faculty accounts can be provisioned via Google in this form");
-        return;
-      }
-    } else {
-      if (!trimmedEmail.endsWith("@iitj.ac.in")) {
-        setError("Google-provisioned users must use @iitj.ac.in email");
-        return;
-      }
-    }
-
+  const handleCreateUser = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
     setCreatingUser(true);
     setError(null);
-    setNotice(null);
-
     try {
-      const payload: {
-        name?: string;
-        email: string;
-        password?: string;
-        role: "ADMIN" | "STAFF" | "FACULTY";
-        department?: string;
-        authProvider: CreateAuthProvider;
-      } = {
-        email: trimmedEmail,
-        role: newRole,
-        authProvider: newAuthProvider,
-      };
-
-      if (newAuthProvider === "email") {
-        payload.name = trimmedName;
-        payload.password = newPassword;
-      } else if (trimmedName) {
-        payload.name = trimmedName;
-      }
-
-      if (trimmedDepartment) {
-        payload.department = trimmedDepartment;
-      }
-
       await createManagedUser({
-        ...payload,
+        email: createForm.email.toLowerCase().trim(),
+        name: createForm.name.trim() || undefined,
+        role: createForm.role,
+        department: createForm.department.trim() || undefined,
+        authProvider: createForm.authProvider,
+        password: createForm.authProvider === "email" ? createForm.password : undefined,
       });
-
-      setNewName("");
-      setNewEmail("");
-      setNewPassword("");
-      setNewDepartment("");
-      setNewRole(newAuthProvider === "google" ? "FACULTY" : "STAFF");
-      setNotice(
-        newAuthProvider === "google"
-          ? "Google access provisioned successfully. User can sign in with Google."
-          : "User created successfully.",
-      );
+      setNotice(`User ${createForm.email} created successfully`);
+      setCreateForm({ name: "", email: "", password: "", role: "FACULTY", department: "", authProvider: "email" });
       await loadUsers(1);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create user");
+      setError(formatError(e, "Failed to create user"));
     } finally {
       setCreatingUser(false);
     }
   };
 
-  const handleUpdateRole = async (targetUser: ManagedUser) => {
-    const selectedRole = roleDraftByUserId[targetUser.id] ??
-      (isAssignableRole(targetUser.role) ? targetUser.role : "STUDENT");
-
-    if (isAssignableRole(targetUser.role) && selectedRole === targetUser.role) {
-      return;
-    }
-
-    setActingRoleUserId(targetUser.id);
-    setError(null);
-    setNotice(null);
-
+  const handleBulkAction = async () => {
+    if (selectedIds.size === 0) return;
+    const userIds = Array.from(selectedIds);
+    setLoading(true);
     try {
-      await updateManagedUserRole(targetUser.id, selectedRole);
-      setNotice(`Role updated for ${getUserDisplayName(targetUser)}.`);
+      if (bulkActionMode === "activate" || bulkActionMode === "deactivate") {
+        const isActive = bulkActionMode === "activate";
+        await Promise.all(userIds.map(id => updateManagedUserActiveStatus(id, isActive)));
+        setNotice(`${userIds.length} user(s) ${isActive ? "activated" : "deactivated"}`);
+      } else if (bulkActionMode === "role") {
+        await Promise.all(userIds.map(id => updateManagedUserRole(id, bulkRole)));
+        setNotice(`${userIds.length} user(s) role updated to ${ROLE_LABELS[bulkRole]}`);
+      }
       await loadUsers(page);
+      setBulkActionMode(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update role");
+      setError(formatError(e, "Bulk action failed"));
     } finally {
-      setActingRoleUserId(null);
+      setLoading(false);
     }
   };
 
-  const handleUpdateAssignments = async (targetUser: ManagedUser) => {
-    if (targetUser.role !== "STAFF") {
-      return;
-    }
-
-    const selectedBuildingIds = assignedBuildingDraftByUserId[targetUser.id] ?? [];
-
-    setActingAssignmentUserId(targetUser.id);
-    setError(null);
-    setNotice(null);
-
+  const handleUpdateRole = async (targetUser: ManagedUser, newRole: AssignableUserRole) => {
+    if (newRole === targetUser.role) return;
+    setLoading(true);
     try {
-      await updateUserBuildingAssignments(targetUser.id, selectedBuildingIds);
-      setNotice(`Building assignments updated for ${getUserDisplayName(targetUser)}.`);
+      await updateManagedUserRole(targetUser.id, newRole);
+      setNotice(`${getUserDisplayName(targetUser)}'s role updated`);
       await loadUsers(page);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update building assignments");
+      setError(formatError(e, "Failed to update role"));
     } finally {
-      setActingAssignmentUserId(null);
+      setLoading(false);
+      setEditingUser(null);
     }
   };
 
-  const handleToggleActive = async (targetUser: ManagedUser) => {
-    const nextIsActive = !targetUser.isActive;
-    setActingActiveUserId(targetUser.id);
-    setError(null);
-    setNotice(null);
-
+  const handleToggleStatus = async (targetUser: ManagedUser) => {
+    setLoading(true);
     try {
-      await updateManagedUserActiveStatus(targetUser.id, nextIsActive);
-      setNotice(`${getUserDisplayName(targetUser)} is now ${nextIsActive ? "active" : "inactive"}.`);
+      await updateManagedUserActiveStatus(targetUser.id, !targetUser.isActive);
+      setNotice(`${getUserDisplayName(targetUser)} ${!targetUser.isActive ? "activated" : "deactivated"}`);
       await loadUsers(page);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update active status");
+      setError(formatError(e, "Failed to update status"));
     } finally {
-      setActingActiveUserId(null);
+      setLoading(false);
+      setDeactivatingUser(null);
     }
   };
 
   const handleDeleteUser = async (targetUser: ManagedUser) => {
-    const confirmed = window.confirm(
-      `Delete ${getUserDisplayName(targetUser)}? This will anonymize and deactivate the account.`,
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    setDeletingUserId(targetUser.id);
-    setError(null);
-    setNotice(null);
-
+    setLoading(true);
     try {
       await deleteManagedUser(targetUser.id);
-      setNotice(`Deleted ${getUserDisplayName(targetUser)}.`);
-
-      const nextPage = page > 1 && rows.length === 1 ? page - 1 : page;
+      setNotice(`${getUserDisplayName(targetUser)} deleted`);
+      const nextPage = page > 1 && users.length === 1 ? page - 1 : page;
       await loadUsers(nextPage);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete user");
+      setError(formatError(e, "Failed to delete user"));
     } finally {
-      setDeletingUserId(null);
+      setLoading(false);
+      setDeletingUser(null);
     }
   };
 
+  const toggleSelectAll = () => {
+    setSelectedIds(selectedIds.size === users.length ? new Set() : new Set(users.map(u => u.id)));
+  };
+
+  const toggleSelectUser = (userId: number) => {
+    const newSelection = new Set(selectedIds);
+    newSelection[newSelection.has(userId) ? "delete" : "add"](userId);
+    setSelectedIds(newSelection);
+  };
+
+  const handleFilterChange = () => {
+    setPagination(p => ({ ...p, page: 1 }));
+    void loadUsers(1);
+  };
+
+  const handlePageSizeChange = (newSize: number) => {
+    setPagination(p => ({ ...p, pageSize: newSize, page: 1 }));
+    void loadUsers(1);
+  };
+
   return (
-    <section>
+    <section className="space-y-6">
       <div className="page-header">
         <h2>User Management</h2>
-        <p>Track users, transfer roles, control account status, and manage staff/admin access.</p>
+        <p>Manage users, roles, and access permissions.</p>
       </div>
-
-      <form className="card section-gap" onSubmit={handleCreateUser}>
-        <div className="card-header">
-          <h3>Provision User Access</h3>
-          <span className="badge badge--info">
-            {newAuthProvider === "google" ? "Google Auth" : "Email + Password"}
-          </span>
-        </div>
-
-        <div className="form-row">
-          <div className="form-field">
-            <label htmlFor="newManagedUserAuthProvider">Auth Method</label>
-            <select
-              id="newManagedUserAuthProvider"
-              className="input"
-              value={newAuthProvider}
-              onChange={(event) => {
-                const provider = event.target.value as CreateAuthProvider;
-                setNewAuthProvider(provider);
-                setNewRole(provider === "google" ? "FACULTY" : "STAFF");
-              }}
-              disabled={creatingUser}
-            >
-              <option value="google">Google Auth (recommended)</option>
-              <option value="email">Email + Password</option>
-            </select>
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="newManagedUserName">Full Name</label>
-            <input
-              id="newManagedUserName"
-              className="input"
-              type="text"
-              value={newName}
-              onChange={(event) => setNewName(event.target.value)}
-              placeholder={newAuthProvider === "google" ? "Optional (auto from email if empty)" : "Aarav Sharma"}
-              disabled={creatingUser}
-            />
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="newManagedUserEmail">Email</label>
-            <input
-              id="newManagedUserEmail"
-              className="input"
-              type="email"
-              value={newEmail}
-              onChange={(event) => setNewEmail(event.target.value)}
-              placeholder="user@iitj.ac.in"
-              disabled={creatingUser}
-            />
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="newManagedUserRole">Role</label>
-            <select
-              id="newManagedUserRole"
-              className="input"
-              value={newRole}
-              onChange={(event) => setNewRole(event.target.value as "ADMIN" | "STAFF" | "FACULTY")}
-              disabled={creatingUser}
-            >
-              {(newAuthProvider === "google" ? GOOGLE_CREATE_ROLE_OPTIONS : ADMIN_CREATE_ROLE_OPTIONS).map((roleOption) => (
-                <option key={roleOption} value={roleOption}>
-                  {ROLE_LABELS[roleOption]}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {newAuthProvider === "email" && (
-            <div className="form-field">
-              <label htmlFor="newManagedUserPassword">Temporary Password</label>
-              <input
-                id="newManagedUserPassword"
-                className="input"
-                type="password"
-                value={newPassword}
-                onChange={(event) => setNewPassword(event.target.value)}
-                placeholder="Minimum 8 characters"
-                disabled={creatingUser}
-              />
-            </div>
-          )}
-        </div>
-
-        <div className="form-row">
-          <div className="form-field">
-            <label htmlFor="newManagedUserDepartment">Department (Optional)</label>
-            <input
-              id="newManagedUserDepartment"
-              className="input"
-              type="text"
-              value={newDepartment}
-              onChange={(event) => setNewDepartment(event.target.value)}
-              placeholder="Computer Science"
-              disabled={creatingUser}
-            />
-          </div>
-        </div>
-
-        <div className="users-create-help">
-          {newAuthProvider === "google" ? (
-            <p>
-              Google users are created by email and can sign in directly with IITJ Google. If an email is not provisioned, first Google login gets STUDENT access by default.
-            </p>
-          ) : (
-            <p>
-              Email/password provisioning is available for ADMIN and STAFF accounts.
-            </p>
-          )}
-        </div>
-
-        <div className="btn-group">
-          <button type="submit" className="btn btn-primary" disabled={creatingUser}>
-            {creatingUser
-              ? "Creating..."
-              : newAuthProvider === "google"
-                ? "Provision Google Access"
-                : "Create Account"}
-          </button>
-        </div>
-      </form>
-
-      <form className="card section-gap" onSubmit={handleApplyFilters}>
-        <div className="card-header">
-          <h3>Directory Filters</h3>
-          <span className="badge badge--info">{totalUsers} users</span>
-        </div>
-
-        <div className="form-row">
-          <div className="form-field">
-            <label htmlFor="usersSearch">Search</label>
-            <input
-              id="usersSearch"
-              className="input"
-              type="text"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Name or email"
-              disabled={loading}
-            />
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="usersDepartment">Department</label>
-            <input
-              id="usersDepartment"
-              className="input"
-              type="text"
-              value={department}
-              onChange={(event) => setDepartment(event.target.value)}
-              placeholder="Department"
-              disabled={loading}
-            />
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="usersRoleFilter">Role</label>
-            <select
-              id="usersRoleFilter"
-              className="input"
-              value={roleFilter}
-              onChange={(event) => setRoleFilter(event.target.value as RoleFilter)}
-              disabled={loading}
-            >
-              {ROLE_FILTER_OPTIONS.map((roleOption) => (
-                <option key={roleOption} value={roleOption}>
-                  {roleOption === "ALL" ? "All Roles" : ROLE_LABELS[roleOption]}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="usersActiveFilter">Status</label>
-            <select
-              id="usersActiveFilter"
-              className="input"
-              value={activeFilter}
-              onChange={(event) => setActiveFilter(event.target.value as ActiveFilter)}
-              disabled={loading}
-            >
-              <option value="ALL">All Statuses</option>
-              <option value="ACTIVE">Active</option>
-              <option value="INACTIVE">Inactive</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="btn-group">
-          <button type="submit" className="btn btn-primary btn-sm" disabled={loading}>
-            Apply Filters
-          </button>
-          <button type="button" className="btn btn-ghost btn-sm" disabled={loading} onClick={handleResetFilters}>
-            Reset
-          </button>
-        </div>
-      </form>
 
       {notice && <div className="alert alert-success">{notice}</div>}
       {error && <div className="alert alert-error">{error}</div>}
 
-      <div className="card users-management-card">
+      <form onSubmit={handleCreateUser} className="card space-y-4">
         <div className="card-header">
-          <h3>User Directory</h3>
-          <span className="users-page-count">Page {page} of {Math.max(totalPages, 1)}</span>
+          <h3>Add New User</h3>
+        </div>
+        <div className="mb-4">
+          <label className="text-sm font-medium mb-2 block">Authentication Provider</label>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="authProvider"
+                value="email"
+                checked={createForm.authProvider === "email"}
+                onChange={(e) => setCreateForm({ ...createForm, authProvider: e.target.value as "email" | "google", password: "" })}
+                disabled={creatingUser}
+                className="w-4 h-4"
+              />
+              <span>Email/Password</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="authProvider"
+                value="google"
+                checked={createForm.authProvider === "google"}
+                onChange={(e) => setCreateForm({ ...createForm, authProvider: e.target.value as "email" | "google", password: "" })}
+                disabled={creatingUser}
+                className="w-4 h-4"
+              />
+              <span>Google OAuth</span>
+            </label>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <Input placeholder="Email" type="email" value={createForm.email} onChange={(e) => setCreateForm({ ...createForm, email: e.target.value })} disabled={creatingUser} required />
+          <Input placeholder="Full Name" value={createForm.name} onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })} disabled={creatingUser} />
+          {createForm.authProvider === "email" && (
+            <Input placeholder="Password (min 8)" type="password" value={createForm.password} onChange={(e) => setCreateForm({ ...createForm, password: e.target.value })} disabled={creatingUser} required minLength={8} />
+          )}
+          <Input placeholder="Department" value={createForm.department} onChange={(e) => setCreateForm({ ...createForm, department: e.target.value })} disabled={creatingUser} />
+        </div>
+        <div className="flex items-end gap-2">
+          <div className="flex-1">
+            <label className="text-sm font-medium mb-2 block">Role</label>
+            <Select value={createForm.role} onValueChange={(v) => setCreateForm({ ...createForm, role: v as "ADMIN" | "STAFF" | "FACULTY" })}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {ROLE_OPTIONS.filter(r => r !== "STUDENT").map(role => <SelectItem key={role} value={role}>{ROLE_LABELS[role]}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button type="submit" disabled={creatingUser}>{creatingUser ? "Creating..." : "Create"}</Button>
+        </div>
+      </form>
+
+      <div className="card space-y-4">
+        <div className="flex gap-2 flex-wrap items-end">
+          <div className="flex-1 min-w-48">
+            <label className="text-sm font-medium mb-2 block">Search</label>
+            <Input placeholder="Name or email" value={filters.search} onChange={(e) => setFilters({ ...filters, search: e.target.value })} onKeyDown={(e) => e.key === "Enter" && handleFilterChange()} />
+          </div>
+          <div className="min-w-40">
+            <label className="text-sm font-medium mb-2 block">Role</label>
+            <Select value={filters.role} onValueChange={(v) => { setFilters({ ...filters, role: v as RoleFilter }); handleFilterChange(); }}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All Roles</SelectItem>
+                {ROLE_OPTIONS.map(role => <SelectItem key={role} value={role}>{ROLE_LABELS[role]}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="min-w-40">
+            <label className="text-sm font-medium mb-2 block">Status</label>
+            <Select value={filters.status} onValueChange={(v) => { setFilters({ ...filters, status: v as "ALL" | "ACTIVE" | "INACTIVE" }); handleFilterChange(); }}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All</SelectItem>
+                <SelectItem value="ACTIVE">Active</SelectItem>
+                <SelectItem value="INACTIVE">Inactive</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="min-w-40">
+            <label className="text-sm font-medium mb-2 block">Department</label>
+            <Input placeholder="Filter..." value={filters.department} onChange={(e) => setFilters({ ...filters, department: e.target.value })} onKeyDown={(e) => e.key === "Enter" && handleFilterChange()} />
+          </div>
+          <Button onClick={handleFilterChange} variant="outline">Apply</Button>
+          <Button onClick={() => { setFilters({ search: "", role: "ALL", status: "ALL", department: "" }); handleFilterChange(); }} variant="outline">Reset</Button>
         </div>
 
-        {loading && <p className="loading-text">Loading users...</p>}
-        {!loading && rows.length === 0 && <p className="empty-text">No users found for the selected filters.</p>}
-
-        {!loading && rows.length > 0 && (
-          <>
-            <div className="users-table-wrap">
-              <table className="users-admin-table">
-                <thead>
-                  <tr>
-                    <th>User</th>
-                    <th>Role</th>
-                    <th>Assigned Buildings</th>
-                    <th>Department</th>
-                    <th>Auth</th>
-                    <th>Status</th>
-                    <th>Joined</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((managedUser) => {
-                    const selectedRole = roleDraftByUserId[managedUser.id] ??
-                      (isAssignableRole(managedUser.role) ? managedUser.role : "STUDENT");
-                    const selectedBuildingIds = assignedBuildingDraftByUserId[managedUser.id] ??
-                      managedUser.assignedBuildings.map((building) => building.id);
-                    const assignedBuildingNames = managedUser.assignedBuildings.map((building) => building.name);
-                    const isRoleActing = actingRoleUserId === managedUser.id;
-                    const isAssignmentActing = actingAssignmentUserId === managedUser.id;
-                    const isActiveActing = actingActiveUserId === managedUser.id;
-                    const isDeleting = deletingUserId === managedUser.id;
-
-                    return (
-                      <tr key={managedUser.id}>
-                        <td>
-                          <div className="users-name-cell">
-                            <span className="users-name">{getUserDisplayName(managedUser)}</span>
-                            <span className="users-email">{managedUser.email}</span>
-                          </div>
-                        </td>
-
-                        <td>
-                          <div className="users-role-cell">
-                            <span className={roleBadgeClass(managedUser.role)}>
-                              {ROLE_LABELS[managedUser.role]}
-                            </span>
-                            <div className="users-role-editor">
-                              <select
-                                className="input"
-                                value={selectedRole}
-                                onChange={(event) => {
-                                  const updatedRole = event.target.value as AssignableUserRole;
-                                  setRoleDraftByUserId((previousDrafts) => ({
-                                    ...previousDrafts,
-                                    [managedUser.id]: updatedRole,
-                                  }));
-                                }}
-                                disabled={isRoleActing || isDeleting}
-                              >
-                                {ASSIGNABLE_ROLE_OPTIONS.map((roleOption) => (
-                                  <option key={roleOption} value={roleOption}>
-                                    {ROLE_LABELS[roleOption]}
-                                  </option>
-                                ))}
-                              </select>
-                              <button
-                                type="button"
-                                className="btn btn-primary btn-sm"
-                                disabled={isRoleActing || isDeleting}
-                                onClick={() => void handleUpdateRole(managedUser)}
-                              >
-                                {isRoleActing ? "Updating..." : "Transfer"}
-                              </button>
-                            </div>
-                          </div>
-                        </td>
-
-                        <td>
-                          {managedUser.role === "STAFF" ? (
-                            <div className="users-building-cell">
-                              <div className="users-building-current">
-                                {assignedBuildingNames.length > 0
-                                  ? assignedBuildingNames.join(", ")
-                                  : "No buildings assigned"}
-                              </div>
-                              <div className="users-building-editor">
-                                <select
-                                  className="input users-building-multiselect"
-                                  multiple
-                                  value={selectedBuildingIds.map((id) => String(id))}
-                                  onChange={(event) => {
-                                    const nextSelectedIds = Array.from(event.target.selectedOptions).map(
-                                      (option) => Number(option.value),
-                                    );
-                                    setAssignedBuildingDraftByUserId((previousDrafts) => ({
-                                      ...previousDrafts,
-                                      [managedUser.id]: nextSelectedIds,
-                                    }));
-                                  }}
-                                  disabled={isAssignmentActing || isDeleting}
-                                >
-                                  {allBuildings.map((building) => (
-                                    <option key={building.id} value={building.id}>
-                                      {building.name}
-                                    </option>
-                                  ))}
-                                </select>
-                                <button
-                                  type="button"
-                                  className="btn btn-primary btn-sm"
-                                  disabled={isAssignmentActing || isDeleting}
-                                  onClick={() => void handleUpdateAssignments(managedUser)}
-                                >
-                                  {isAssignmentActing ? "Saving..." : "Save Buildings"}
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <span className="users-muted">-</span>
-                          )}
-                        </td>
-
-                        <td>{managedUser.department ?? "-"}</td>
-                        <td>{managedUser.registeredVia}</td>
-
-                        <td>
-                          <div className="users-status-stack">
-                            <span className={managedUser.isActive ? "badge badge--success" : "badge badge--muted"}>
-                              {managedUser.isActive ? "Active" : "Inactive"}
-                            </span>
-                            {managedUser.firstLogin && <span className="users-muted">First login pending</span>}
-                          </div>
-                        </td>
-
-                        <td>{formatDateDDMMYYYY(managedUser.createdAt)}</td>
-
-                        <td>
-                          <div className="users-actions">
-                            <button
-                              type="button"
-                              className={`btn btn-sm ${managedUser.isActive ? "btn-ghost" : "btn-success"}`}
-                              disabled={isActiveActing || isDeleting}
-                              onClick={() => void handleToggleActive(managedUser)}
-                            >
-                              {isActiveActing
-                                ? "Saving..."
-                                : managedUser.isActive
-                                  ? "Deactivate"
-                                  : "Activate"}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-danger btn-sm"
-                              disabled={isDeleting || isRoleActing || isActiveActing}
-                              onClick={() => void handleDeleteUser(managedUser)}
-                            >
-                              {isDeleting ? "Deleting..." : "Delete"}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            {totalPages > 1 && (
-              <div className="users-pagination">
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  disabled={page <= 1 || loading}
-                  onClick={() => void loadUsers(page - 1)}
-                >
-                  Previous
-                </button>
-
-                <span className="users-page-count">Page {page} of {Math.max(totalPages, 1)}</span>
-
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  disabled={page >= totalPages || loading}
-                  onClick={() => void loadUsers(page + 1)}
-                >
-                  Next
-                </button>
-              </div>
-            )}
-          </>
+        {selectedIds.size > 0 && (
+          <div className="flex items-center gap-2 p-3 bg-muted rounded">
+            <span className="text-sm font-medium">{selectedIds.size} selected</span>
+            <Button size="sm" onClick={() => setBulkActionMode("activate")} variant="outline">Activate</Button>
+            <Button size="sm" onClick={() => setBulkActionMode("deactivate")} variant="outline">Deactivate</Button>
+            <Button size="sm" onClick={() => setBulkActionMode("role")} variant="outline">Change Role</Button>
+          </div>
         )}
       </div>
+
+      <div className="card overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-12"><input type="checkbox" checked={selectedIds.size === users.length && users.length > 0} onChange={toggleSelectAll} className="rounded" /></TableHead>
+              <TableHead>Name</TableHead>
+              <TableHead>Email</TableHead>
+              <TableHead>Role</TableHead>
+              <TableHead>Department</TableHead>
+              <TableHead>Buildings</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {loading && users.length === 0 ? (
+              <TableRow><TableCell colSpan={8} className="text-center py-8 text-muted-foreground">Loading...</TableCell></TableRow>
+            ) : users.length === 0 ? (
+              <TableRow><TableCell colSpan={8} className="text-center py-8 text-muted-foreground">No users found</TableCell></TableRow>
+            ) : (
+              users.map(u => (
+                <TableRow key={u.id}>
+                  <TableCell><input type="checkbox" checked={selectedIds.has(u.id)} onChange={() => toggleSelectUser(u.id)} className="rounded" /></TableCell>
+                  <TableCell className="font-medium">{getUserDisplayName(u)}</TableCell>
+                  <TableCell className="text-sm">{u.email}</TableCell>
+                  <TableCell><Badge variant={roleBadgeVariant(u.role)}>{ROLE_LABELS[u.role]}</Badge></TableCell>
+                  <TableCell className="text-sm">{u.department || "—"}</TableCell>
+                  <TableCell className="text-sm">
+                    {u.role === "STAFF" ? (
+                      u.assignedBuildings?.length > 0 ? (
+                        <div className="flex gap-1 flex-wrap">
+                          {u.assignedBuildings.slice(0, 2).map(b => (
+                            <Badge key={b.id} variant="secondary" className="text-xs">{b.name}</Badge>
+                          ))}
+                          {u.assignedBuildings.length > 2 && (
+                            <Badge variant="secondary" className="text-xs">+{u.assignedBuildings.length - 2}</Badge>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground">None</span>
+                      )
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell><Badge variant={u.isActive ? "outline" : "secondary"}>{u.isActive ? "Active" : "Inactive"}</Badge></TableCell>
+                  <TableCell className="text-right space-x-1">
+                    <Button size="sm" variant="outline" onClick={() => setEditingUser(u)}>Edit</Button>
+                    {u.role === "STAFF" && (
+                      <Button size="sm" variant="outline" onClick={() => setManagingBuildingsUser(u)}>Buildings</Button>
+                    )}
+                    <Button size="sm" variant="outline" onClick={() => setDeactivatingUser(u)}>{u.isActive ? "Deactivate" : "Activate"}</Button>
+                    <Button size="sm" variant="destructive" onClick={() => setDeletingUser(u)}>Delete</Button>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+
+        <div className="flex items-center justify-between p-4 border-t">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Size:</span>
+            <Select value={String(pageSize)} onValueChange={(v) => handlePageSizeChange(parseInt(v))}>
+              <SelectTrigger className="w-20">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PAGE_SIZES.map(size => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="text-sm text-muted-foreground">
+            {totalUsers === 0 ? "No users" : `${(page - 1) * pageSize + 1}–${Math.min(page * pageSize, totalUsers)} of ${totalUsers}`}
+          </div>
+          <div className="flex gap-2">
+            <Button onClick={() => loadUsers(Math.max(1, page - 1))} disabled={page === 1} variant="outline" size="sm">Previous</Button>
+            <span className="text-sm text-muted-foreground px-3 py-2">{page} / {totalPages || 1}</span>
+            <Button onClick={() => loadUsers(page + 1)} disabled={page >= totalPages} variant="outline" size="sm">Next</Button>
+          </div>
+        </div>
+      </div>
+
+      <Dialog open={!!editingUser} onOpenChange={(open) => !open && setEditingUser(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit User Role</DialogTitle>
+            <DialogDescription>Change the role for {editingUser && getUserDisplayName(editingUser)}</DialogDescription>
+          </DialogHeader>
+          {editingUser && (
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium mb-2 block">New Role</label>
+                <Select value={editingUser.role} onValueChange={(v) => setEditingUser({ ...editingUser, role: v as AssignableUserRole })}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ROLE_OPTIONS.map(role => <SelectItem key={role} value={role}>{ROLE_LABELS[role]}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex gap-2 justify-end">
+                <Button variant="outline" onClick={() => setEditingUser(null)}>Cancel</Button>
+                <Button onClick={() => handleUpdateRole(editingUser, editingUser.role as AssignableUserRole)}>Save</Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={!!deactivatingUser} onOpenChange={(open) => !open && setDeactivatingUser(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{deactivatingUser?.isActive ? "Deactivate" : "Activate"} User?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deactivatingUser && (deactivatingUser.isActive ? `${getUserDisplayName(deactivatingUser)} will be deactivated.` : `${getUserDisplayName(deactivatingUser)} will be activated.`)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex gap-2 justify-end">
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => deactivatingUser && handleToggleStatus(deactivatingUser)}>
+              {deactivatingUser?.isActive ? "Deactivate" : "Activate"}
+            </AlertDialogAction>
+          </div>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!deletingUser} onOpenChange={(open) => !open && setDeletingUser(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete User?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deletingUser && `${getUserDisplayName(deletingUser)} will be deleted permanently.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex gap-2 justify-end">
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => deletingUser && handleDeleteUser(deletingUser)} className="bg-destructive">
+              Delete
+            </AlertDialogAction>
+          </div>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!bulkActionMode} onOpenChange={(open) => !open && setBulkActionMode(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {bulkActionMode === "activate" && "Activate Users?"}
+              {bulkActionMode === "deactivate" && "Deactivate Users?"}
+              {bulkActionMode === "role" && "Change Role?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This will affect {selectedIds.size} user(s).
+              {bulkActionMode === "role" && ` New role: ${ROLE_LABELS[bulkRole]}`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {bulkActionMode === "role" && (
+            <div className="space-y-3">
+              <label className="text-sm font-medium">Select Role</label>
+              <Select value={bulkRole} onValueChange={(v) => setBulkRole(v as AssignableUserRole)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ROLE_OPTIONS.map(role => <SelectItem key={role} value={role}>{ROLE_LABELS[role]}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="flex gap-2 justify-end">
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleBulkAction}>Confirm</AlertDialogAction>
+          </div>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <BuildingAssignmentDialog
+        user={managingBuildingsUser}
+        open={!!managingBuildingsUser}
+        onOpenChange={(open) => !open && setManagingBuildingsUser(null)}
+        onSuccess={() => {
+          setNotice(`Building assignments updated successfully`);
+          void loadUsers(page);
+        }}
+      />
     </section>
   );
 }

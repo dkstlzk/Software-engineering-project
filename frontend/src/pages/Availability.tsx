@@ -1,729 +1,1093 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
-import {
-  getAvailability,
-  getBuildings,
-  getRoomAvailability,
-  getRooms,
-} from "../api/api";
-import type { AvailabilityBuilding, Building, Room } from "../api/api";
-import { DateInput } from "../components/DateInput";
-import {
-  formatDateDDMMYYYY,
-  formatDateTimeDDMMYYYY,
-} from "../utils/datetime";
-import type {
-  AvailabilityPrefill,
-  BookingRequestPrefill,
-} from "./bookingAvailabilityBridge";
-
-type SearchMode = "TIME" | "BUILDING_ROOM";
-
-type RoomTimeBand = {
-  startAt: string;
-  endAt: string;
-  isAvailable: boolean;
-};
+import { useState, useEffect } from "react";
+import { X, AlertCircle } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { useRoomDayTimeline } from "../hooks/useAvailability";
+import { useBuildings } from "../hooks/useBuildings";
+import { useRooms } from "../hooks/useRooms";
+import { useAuth } from "../auth/AuthContext";
+import { getUserBuildingAssignments } from "../lib/api";
+import { ExactAvailabilityView } from "./components/ExactAvailabilityView";
+import type { Room } from "../lib/api";
+import type { BookingRequestPrefill } from "./bookingAvailabilityBridge";
 
 type AvailabilityPageProps = {
   canRequestBooking?: boolean;
-  prefill?: AvailabilityPrefill | null;
+  prefill?: any;
   onPrefillApplied?: () => void;
-  onRequestBooking?: (prefill: BookingRequestPrefill) => void;
+  onRequestBooking?: (prefill: any) => void;
 };
 
-function pad2(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
-function parseTimeToMinutes(value: string): number | null {
-  const match = value.match(/^(\d{2}):(\d{2})$/);
-  if (!match) {
-    return null;
-  }
-
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
-    return null;
-  }
-
-  return (hours * 60) + minutes;
-}
-
-function minutesToTime(value: number): string {
-  const hours = Math.floor(value / 60);
-  const minutes = value % 60;
-  return `${pad2(hours)}:${pad2(minutes)}`;
-}
-
-function toLocalDateTimeValue(ms: number): string {
-  const date = new Date(ms);
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-}
-
-function toTimeLabel(dateTimeValue: string): string {
-  const date = new Date(dateTimeValue);
-  if (Number.isNaN(date.getTime())) {
-    const fromString = dateTimeValue.slice(11, 16);
-    return fromString.length === 5 ? fromString : dateTimeValue;
-  }
-
-  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-}
-
-function buildLocalDateTime(date: string, totalMinutes: number): string {
-  return `${date}T${minutesToTime(totalMinutes)}`;
-}
-
-function buildContinuousBands(
-  windowStartAt: string,
-  windowEndAt: string,
-  bookings: Array<{ startAt: string; endAt: string }>,
-): RoomTimeBand[] {
-  const windowStartMs = new Date(windowStartAt).getTime();
-  const windowEndMs = new Date(windowEndAt).getTime();
-
-  if (
-    Number.isNaN(windowStartMs) ||
-    Number.isNaN(windowEndMs) ||
-    windowStartMs >= windowEndMs
-  ) {
-    return [];
-  }
-
-  const bookingIntervals: Array<{ startMs: number; endMs: number }> = [];
-  const boundaries = new Set<number>([windowStartMs, windowEndMs]);
-
-  for (const booking of bookings) {
-    const startMs = new Date(booking.startAt).getTime();
-    const endMs = new Date(booking.endAt).getTime();
-    if (Number.isNaN(startMs) || Number.isNaN(endMs) || startMs >= endMs) {
-      continue;
-    }
-
-    const clippedStartMs = Math.max(startMs, windowStartMs);
-    const clippedEndMs = Math.min(endMs, windowEndMs);
-    if (clippedStartMs >= clippedEndMs) {
-      continue;
-    }
-
-    bookingIntervals.push({
-      startMs: clippedStartMs,
-      endMs: clippedEndMs,
-    });
-    boundaries.add(clippedStartMs);
-    boundaries.add(clippedEndMs);
-  }
-
-  const sortedBoundaries = Array.from(boundaries).sort((a, b) => a - b);
-  if (sortedBoundaries.length < 2) {
-    return [];
-  }
-
-  const merged: Array<{ startMs: number; endMs: number; isAvailable: boolean }> = [];
-
-  for (let i = 0; i < sortedBoundaries.length - 1; i += 1) {
-    const segmentStartMs = sortedBoundaries[i];
-    const segmentEndMs = sortedBoundaries[i + 1];
-    if (segmentStartMs >= segmentEndMs) {
-      continue;
-    }
-
-    const isBooked = bookingIntervals.some(
-      (booking) => segmentStartMs < booking.endMs && segmentEndMs > booking.startMs,
-    );
-
-    const previous = merged[merged.length - 1];
-    if (
-      previous &&
-      previous.isAvailable === !isBooked &&
-      previous.endMs === segmentStartMs
-    ) {
-      previous.endMs = segmentEndMs;
-      continue;
-    }
-
-    merged.push({
-      startMs: segmentStartMs,
-      endMs: segmentEndMs,
-      isAvailable: !isBooked,
-    });
-  }
-
-  return merged.map((segment) => ({
-    startAt: toLocalDateTimeValue(segment.startMs),
-    endAt: toLocalDateTimeValue(segment.endMs),
-    isAvailable: segment.isAvailable,
-  }));
-}
-
 export function AvailabilityPage({
-  canRequestBooking = false,
-  prefill,
-  onPrefillApplied,
-  onRequestBooking,
+  canRequestBooking: _canRequestBooking,
+  prefill: _prefill,
+  onPrefillApplied: _onPrefillApplied,
+  onRequestBooking: _onRequestBooking,
 }: AvailabilityPageProps) {
-  const [mode, setMode] = useState<SearchMode>("TIME");
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const isStaff = user?.role === "STAFF";
+  const isAdmin = user?.role === "ADMIN";
+  const canViewBookingsPage = isStaff || isAdmin;
 
-  const [buildings, setBuildings] = useState<Building[]>([]);
-  const [rooms, setRooms] = useState<Room[]>([]);
-  const [showOnlyAvailableRooms, setShowOnlyAvailableRooms] = useState(false);
+  const [viewMode, setViewMode] = useState<"time" | "room" | "exact">("time");
+  const [selectedBuildingId, setSelectedBuildingId] = useState<number | null>(null);
+  const [selectedRoomId, setSelectedRoomId] = useState<number | null>(null);
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [selectedRoomIds, setSelectedRoomIds] = useState<number[]>([]);
+  const [selectedDates, setSelectedDates] = useState<string[]>([]);
+  const [staffBuildingIds, setStaffBuildingIds] = useState<number[]>([]);
+  const [timeRangeStart, setTimeRangeStart] = useState("00:00");
+  const [timeRangeEnd, setTimeRangeEnd] = useState("23:59");
+  const [showRoomGrid, setShowRoomGrid] = useState(false);
+  const [selectedBuildingIdForRoomView, setSelectedBuildingIdForRoomView] = useState<number | null>(null);
+  const [selectedRoomIdForRoomView, setSelectedRoomIdForRoomView] = useState<number | null>(null);
 
-  const [timeResults, setTimeResults] = useState<AvailabilityBuilding[] | null>(null);
-  const [roomTimeBands, setRoomTimeBands] = useState<RoomTimeBand[] | null>(null);
-  const [roomSearchMeta, setRoomSearchMeta] = useState<{
-    buildingName: string;
-    roomName: string;
-    date: string;
-    startAt: string;
-    endAt: string;
-  } | null>(null);
+  const { data: buildings = [] } = useBuildings();
+  const { data: allRooms = [] } = useRooms(undefined, true);
 
-  const [timeStartAt, setTimeStartAt] = useState("");
-  const [timeEndAt, setTimeEndAt] = useState("");
-  const [timeBuildingId, setTimeBuildingId] = useState<number | "">("");
-
-  const [roomDate, setRoomDate] = useState("");
-  const [roomStartTime, setRoomStartTime] = useState("09:00");
-  const [roomEndTime, setRoomEndTime] = useState("18:00");
-  const [roomBuildingId, setRoomBuildingId] = useState<number | "">("");
-  const [roomId, setRoomId] = useState<number | "">("");
-
-  const [focusedRoomId, setFocusedRoomId] = useState<number | null>(null);
-
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+  // When building changes, reset room selection
   useEffect(() => {
-    let isMounted = true;
+    setSelectedRoomId(null);
+    setSelectedDates([]);
+  }, [selectedBuildingId]);
 
-    void (async () => {
+  // Load staff's assigned buildings
+  useEffect(() => {
+    if (!isStaff || !user) return;
+
+    const loadStaffBuildings = async () => {
       try {
-        const data = await getBuildings();
-        if (!isMounted) {
-          return;
-        }
-        setBuildings(data);
-      } catch {
-        if (!isMounted) {
-          return;
-        }
-        setBuildings([]);
+        const response = await getUserBuildingAssignments(user.id);
+        setStaffBuildingIds(response.buildingIds);
+      } catch (error) {
+        console.error("Failed to load staff building assignments:", error);
+        setStaffBuildingIds([]);
       }
-    })();
-
-    return () => {
-      isMounted = false;
     };
-  }, []);
 
-  useEffect(() => {
-    if (roomBuildingId === "") {
-      setRooms([]);
-      setRoomId("");
-      return;
+    void loadStaffBuildings();
+  }, [isStaff, user]);
+
+  // Get selected room with building info
+  const selectedRoom: (Room & { buildingName?: string }) | null = selectedRoomId
+    ? (() => {
+        const room = allRooms.find((r) => r.id === selectedRoomId);
+        if (!room) return null;
+        const building = buildings.find((b) => b.id === room.buildingId);
+        return {
+          ...room,
+          buildingName: building?.name,
+        };
+      })()
+    : null;
+
+  const handleRemoveDate = (index: number) => {
+    if (selectedDates.length > 1) {
+      setSelectedDates(selectedDates.filter((_, i) => i !== index));
+    }
+  };
+
+  // Handle clicking on an available slot and navigate with prefill
+  const handleSlotClick = (roomId: number, buildingId: number, startTime: string, endTime: string) => {
+    const prefill: BookingRequestPrefill = {
+      roomId,
+      startAt: startTime,
+      endAt: endTime,
+      buildingId,
+    };
+
+    if (canViewBookingsPage) {
+      // Staff and Admin go to Bookings page
+      navigate("/bookings", { state: { prefill } });
+    } else {
+      // Student and Faculty go to Booking Requests page
+      navigate("/requests", { state: { prefill } });
+    }
+  };
+
+  // Filter buildings and rooms based on user role
+  const visibleBuildings = isStaff
+    ? buildings.filter((b) => staffBuildingIds.includes(b.id))
+    : buildings;
+
+  const buildingRooms = selectedBuildingId
+    ? allRooms.filter((r) => r.buildingId === selectedBuildingId)
+    : [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-start">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Room Availability</h1>
+          <p className="text-gray-600 mt-1">View and manage room availability</p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setViewMode("time")}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              viewMode === "time"
+                ? "bg-blue-500 text-white"
+                : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+            }`}
+          >
+            Browse by Time
+          </button>
+          <button
+            onClick={() => setViewMode("room")}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              viewMode === "room"
+                ? "bg-blue-500 text-white"
+                : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+            }`}
+          >
+            Browse by Room
+          </button>
+          <button
+            onClick={() => setViewMode("exact")}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              viewMode === "exact"
+                ? "bg-blue-500 text-white"
+                : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+            }`}
+          >
+            Exact Availability
+          </button>
+        </div>
+      </div>
+
+      {/* Browse by Time View */}
+      {viewMode === "time" && (
+      <div className="card">
+        {/* Building and Room Selection Section */}
+        <div className="card-header">
+          <h3>Select Building and Room</h3>
+        </div>
+        <div className="p-6 space-y-4 border-b border-gray-200">
+          <div className="flex gap-4">
+            {/* Building Dropdown */}
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Building
+              </label>
+              <select
+                value={selectedBuildingId || ""}
+                onChange={(e) => setSelectedBuildingId(e.target.value ? Number(e.target.value) : null)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="">-- Select a building --</option>
+                {visibleBuildings.map((building) => (
+                  <option key={building.id} value={building.id}>
+                    {building.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Room Dropdown */}
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Room
+              </label>
+              <select
+                value={selectedRoomId || ""}
+                onChange={(e) => setSelectedRoomId(e.target.value ? Number(e.target.value) : null)}
+                disabled={!selectedBuildingId}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500"
+              >
+                <option value="">-- Select a room --</option>
+                {buildingRooms.map((room) => (
+                  <option key={room.id} value={room.id}>
+                    {room.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Time Range Selection */}
+          {selectedRoomId && selectedRoom && (
+            <div className="flex gap-4 pt-2 border-t border-gray-200 items-end">
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Time Range From
+                </label>
+                <input
+                  type="time"
+                  value={timeRangeStart}
+                  onChange={(e) => setTimeRangeStart(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Time Range To
+                </label>
+                <input
+                  type="time"
+                  value={timeRangeEnd}
+                  onChange={(e) => setTimeRangeEnd(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Timeline Grid View Section */}
+        {selectedRoomId && selectedRoom && (
+          <>
+            {/* Grid: Dates (rows) x Time (columns) */}
+            <div className="overflow-x-auto">
+              <AvailabilityGrid
+                roomId={selectedRoomId}
+                dates={selectedDates}
+                onRemoveDate={handleRemoveDate}
+                onSelectDate={(date) => {
+                  if (!selectedDates.includes(date)) {
+                    setSelectedDates([...selectedDates, date]);
+                  }
+                }}
+                timeRangeStart={timeRangeStart}
+                timeRangeEnd={timeRangeEnd}
+                onSlotClick={handleSlotClick}
+                buildingId={selectedBuildingId}
+              />
+            </div>
+
+            {/* Legend */}
+            <div className="flex gap-6 text-sm p-6 border-t border-gray-200">
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 bg-emerald-500 rounded"></div>
+                <span>Available</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 bg-red-500 rounded"></div>
+                <span>Booked</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 bg-red-900 rounded"></div>
+                <span>Restricted</span>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+      )}
+
+      {/* Browse by Room View */}
+      {viewMode === "room" && (
+      <div className="card">
+        {/* Date Selection Section */}
+        <div className="card-header">
+          <h3>Select Date and Rooms</h3>
+        </div>
+        <div className="p-6 space-y-4 border-b border-gray-200">
+          <div className="flex gap-4 items-end">
+            {/* Date Picker */}
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Date
+              </label>
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+
+            {/* Time Range From */}
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Time Range From
+              </label>
+              <input
+                type="time"
+                value={timeRangeStart}
+                onChange={(e) => setTimeRangeStart(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+
+            {/* Time Range To */}
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Time Range To
+              </label>
+              <input
+                type="time"
+                value={timeRangeEnd}
+                onChange={(e) => setTimeRangeEnd(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+
+            <button
+              onClick={() => setShowRoomGrid(true)}
+              className="btn btn-primary btn-sm"
+              title="Load grid"
+            >
+              ↓
+            </button>
+          </div>
+        </div>
+
+        {/* Add Room Section */}
+        <div className="p-6 space-y-4 border-b border-gray-200">
+          <div className="flex gap-4 items-end">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Building
+              </label>
+              <select
+                value={selectedBuildingIdForRoomView || ""}
+                onChange={(e) => {
+                  setSelectedBuildingIdForRoomView(e.target.value ? Number(e.target.value) : null);
+                  setSelectedRoomIdForRoomView(null);
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="">-- Select building --</option>
+                {buildings.map((building) => (
+                  <option key={building.id} value={building.id}>
+                    {building.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Room
+              </label>
+              <select
+                value={selectedRoomIdForRoomView || ""}
+                onChange={(e) => setSelectedRoomIdForRoomView(e.target.value ? Number(e.target.value) : null)}
+                disabled={!selectedBuildingIdForRoomView}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500"
+              >
+                <option value="">-- Select room --</option>
+                {allRooms
+                  .filter((r) => r.buildingId === selectedBuildingIdForRoomView && !selectedRoomIds.includes(r.id))
+                  .map((room) => (
+                    <option key={room.id} value={room.id}>
+                      {room.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <button
+              onClick={() => {
+                if (selectedRoomIdForRoomView && !selectedRoomIds.includes(selectedRoomIdForRoomView)) {
+                  setSelectedRoomIds((prev) => [...prev, selectedRoomIdForRoomView]);
+                  setSelectedRoomIdForRoomView(null);
+                }
+              }}
+              disabled={!selectedRoomIdForRoomView}
+              className="btn btn-primary btn-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Add Room
+            </button>
+          </div>
+        </div>
+
+        {/* Rooms Grid */}
+        {selectedRoomIds.length > 0 && showRoomGrid && (
+          <>
+            <div className="overflow-x-auto">
+              <RoomAvailabilityGrid
+                date={selectedDate}
+                rooms={allRooms.filter((r) => selectedRoomIds.includes(r.id))}
+                selectedRoomIds={selectedRoomIds}
+                onToggleRoom={(roomId) => {
+                  setSelectedRoomIds((prev) =>
+                    prev.includes(roomId) ? prev.filter((id) => id !== roomId) : [...prev, roomId]
+                  );
+                }}
+                timeRangeStart={timeRangeStart}
+                timeRangeEnd={timeRangeEnd}
+                onSlotClick={handleSlotClick}
+              />
+            </div>
+
+            {/* Legend */}
+            <div className="flex gap-6 text-sm p-6 border-t border-gray-200">
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 bg-emerald-500 rounded"></div>
+                <span>Available</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 bg-red-500 rounded"></div>
+                <span>Booked</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 bg-red-900 rounded"></div>
+                <span>Restricted</span>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+      )}
+
+      {/* Exact Availability View */}
+      {viewMode === "exact" && (
+        <div className="space-y-6">
+          {/* Date and Time Selection for Exact View */}
+          <div className="card">
+            <div className="card-header">
+              <h3>Select Date and Time</h3>
+              <p className="text-sm text-gray-600 mt-1">Choose a date to check exact room availability</p>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Date Selection - Single date only */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Select Date
+                  </label>
+                  <input
+                    type="date"
+                    value={selectedDates[0] || new Date().toISOString().split('T')[0]}
+                    onChange={(e) => {
+                      setSelectedDates([e.target.value]);
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Time Range From */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Time From
+                  </label>
+                  <input
+                    type="time"
+                    value={timeRangeStart}
+                    onChange={(e) => setTimeRangeStart(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Time Range To */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Time To
+                  </label>
+                  <input
+                    type="time"
+                    value={timeRangeEnd}
+                    onChange={(e) => setTimeRangeEnd(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Exact Availability View Component - always show so user can select buildings */}
+          <ExactAvailabilityView
+            selectedDates={selectedDates}
+            timeRangeStart={timeRangeStart}
+            timeRangeEnd={timeRangeEnd}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Room Availability Grid Component
+function RoomAvailabilityGrid({
+  date,
+  rooms,
+  selectedRoomIds,
+  onToggleRoom,
+  timeRangeStart,
+  timeRangeEnd,
+  onSlotClick,
+}: {
+  date: string;
+  rooms: Room[];
+  selectedRoomIds: number[];
+  onToggleRoom: (roomId: number) => void;
+  timeRangeStart: string;
+  timeRangeEnd: string;
+  onSlotClick?: (roomId: number, buildingId: number, startTime: string, endTime: string) => void;
+}) {
+
+  // Convert time range to minutes for calculations
+  const [startHour, startMin] = timeRangeStart.split(':').map(Number);
+  const [endHour, endMin] = timeRangeEnd.split(':').map(Number);
+  const rangeStartMinutes = startHour * 60 + startMin;
+  const rangeEndMinutes = endHour * 60 + endMin;
+
+  // Generate time labels with position info
+  const generateTimeLabels = () => {
+    const labels = [];
+    const totalMinutes = rangeEndMinutes - rangeStartMinutes || 1440;
+    
+    for (let i = 0; i < 5; i++) {
+      const fraction = i / 4;
+      const minutes = rangeStartMinutes + (fraction * totalMinutes);
+      const h = Math.floor(minutes / 60) % 24;
+      const m = Math.floor(minutes % 60);
+      const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      labels.push({
+        time: timeStr,
+        percentage: fraction * 100,
+      });
+    }
+    return labels;
+  };
+
+  const timeLabels = generateTimeLabels();
+
+  return (
+    <div className="w-full">
+      {/* Header with time labels using Grid */}
+      <div className="grid border-b border-gray-300" style={{
+        gridTemplateColumns: '200px 1fr',
+      }}>
+        {/* Room Column Header */}
+        <div className="bg-gray-200 p-3 font-semibold text-sm text-gray-700 border-r border-gray-300 whitespace-nowrap overflow-hidden">
+          Room
+        </div>
+        {/* Timeline Column Header */}
+        <div className="relative h-16 bg-gray-100 border-b border-gray-300">
+          {/* Time labels with absolute positioning */}
+          {timeLabels.map((label, idx) => {
+            let transform = 'translateX(-50%)';
+            let left = label.percentage;
+            
+            if (idx === 0) {
+              transform = 'translateX(0)';
+              left = 0;
+            } else if (idx === timeLabels.length - 1) {
+              transform = 'translateX(-100%)';
+              left = 100;
+            }
+            
+            return (
+              <div
+                key={idx}
+                className="absolute text-xs text-gray-600 font-semibold pointer-events-none whitespace-nowrap"
+                style={{
+                  left: `${left}%`,
+                  top: '4px',
+                  transform,
+                }}
+              >
+                {label.time}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Room rows */}
+      {rooms.map((room, idx) => (
+        <RoomRow
+          key={room.id}
+          room={room}
+          date={date}
+          roomIndex={idx}
+          isSelected={selectedRoomIds.includes(room.id)}
+          onToggle={() => onToggleRoom(room.id)}
+          timeRangeStart={timeRangeStart}
+          timeRangeEnd={timeRangeEnd}
+          onSlotClick={onSlotClick}
+        />
+      ))}
+
+    </div>
+  );
+}
+
+// Room Row Component
+function RoomRow({
+  room,
+  date,
+  roomIndex,
+  isSelected,
+  onToggle,
+  timeRangeStart,
+  timeRangeEnd,
+  onSlotClick,
+}: {
+  room: Room;
+  date: string;
+  roomIndex: number;
+  isSelected: boolean;
+  onToggle: () => void;
+  timeRangeStart: string;
+  timeRangeEnd: string;
+  onSlotClick?: (roomId: number, buildingId: number, startTime: string, endTime: string) => void;
+}) {
+  const { data: timelineData, isLoading, error } = useRoomDayTimeline(room.id, date, true);
+
+  // Convert time range to minutes
+  const [startHour, startMin] = timeRangeStart.split(':').map(Number);
+  const [endHour, endMin] = timeRangeEnd.split(':').map(Number);
+  const rangeStartMinutes = startHour * 60 + startMin;
+  const rangeEndMinutes = endHour * 60 + endMin;
+
+  // Step 1: Normalize time
+  const getMinutesFromDayStart = (isoString: string, dayDate: string): number => {
+    const segmentDate = new Date(isoString);
+    const dayStart = new Date(dayDate);
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const diffMs = segmentDate.getTime() - dayStart.getTime();
+    return Math.round(diffMs / (1000 * 60));
+  };
+
+  // Step 2: Compute layout metrics
+  const getSegmentWidth = (startMin: number, endMin: number): number => {
+    const totalDuration = rangeEndMinutes - rangeStartMinutes || 1440;
+    const clampedStart = Math.max(startMin, rangeStartMinutes);
+    const clampedEnd = Math.min(endMin, rangeEndMinutes);
+    
+    if (clampedStart >= clampedEnd) return 0;
+    
+    const duration = clampedEnd - clampedStart;
+    return (duration / totalDuration) * 100;
+  };
+
+  const getSegmentLeft = (startMin: number): number => {
+    const totalDuration = rangeEndMinutes - rangeStartMinutes || 1440;
+    const positionInRange = Math.max(0, startMin - rangeStartMinutes);
+    return (positionInRange / totalDuration) * 100;
+  };
+
+  const formatTime = (isoString: string): string => {
+    const dateObj = new Date(isoString);
+    const h = dateObj.getUTCHours().toString().padStart(2, '0');
+    const m = dateObj.getUTCMinutes().toString().padStart(2, '0');
+    return `${h}:${m}`;
+  };
+
+  const renderSegments = () => {
+    if (error) {
+      return (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <AlertCircle className="w-4 h-4 text-red-500" />
+        </div>
+      );
     }
 
-    let isMounted = true;
-
-    void (async () => {
-      try {
-        const nextRooms = await getRooms(roomBuildingId);
-        if (!isMounted) {
-          return;
-        }
-
-        setRooms(nextRooms);
-        setRoomId((previousRoomId) => {
-          if (
-            typeof previousRoomId === "number" &&
-            nextRooms.some((room) => room.id === previousRoomId)
-          ) {
-            return previousRoomId;
-          }
-
-          return nextRooms[0]?.id ?? "";
-        });
-      } catch {
-        if (!isMounted) {
-          return;
-        }
-        setRooms([]);
-        setRoomId("");
-      }
-    })();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [roomBuildingId]);
-
-  const groupedTimeResults = useMemo(() => {
-    if (timeResults === null) {
+    if (!timelineData?.segments || timelineData.segments.length === 0) {
       return null;
     }
 
-    return timeResults
-      .map((group) => ({
-        ...group,
-        rooms: showOnlyAvailableRooms
-          ? group.rooms.filter((room) => room.isAvailable)
-          : group.rooms,
-      }))
-      .filter((group) => group.rooms.length > 0);
-  }, [timeResults, showOnlyAvailableRooms]);
+    return timelineData.segments.map((segment, idx) => {
+      const startMin = getMinutesFromDayStart(segment.start, date);
+      const endMin = getMinutesFromDayStart(segment.end, date);
+      const width = getSegmentWidth(startMin, endMin);
+      const left = getSegmentLeft(startMin);
 
-  const roomCards = useMemo(() => {
-    if (groupedTimeResults === null) {
-      return [];
-    }
-
-    return groupedTimeResults.flatMap((group) => (
-      group.rooms.map((room) => ({
-        isAvailable: room.isAvailable,
-      }))
-    ));
-  }, [groupedTimeResults]);
-
-  const runTimeSearch = useCallback(
-    async ({
-      startAt,
-      endAt,
-      buildingId,
-    }: {
-      startAt: string;
-      endAt: string;
-      buildingId?: number;
-    }) => {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const data = await getAvailability(startAt, endAt, buildingId);
-
-        setTimeResults(data);
-        setRoomTimeBands(null);
-        setRoomSearchMeta(null);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to check availability");
-      } finally {
-        setLoading(false);
+      if (width === 0 || startMin >= rangeEndMinutes || endMin <= rangeStartMinutes) {
+        return null;
       }
-    },
-    [],
-  );
 
-  useEffect(() => {
-    if (!prefill) {
-      return;
-    }
+      const isAvailable = segment.status === 'free';
+      const bgColor = isAvailable ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-red-500 hover:bg-red-600';
+      const cursor = isAvailable ? 'cursor-pointer' : 'cursor-default';
 
-    const parsedStart = new Date(prefill.startAt).getTime();
-    const parsedEnd = new Date(prefill.endAt).getTime();
-
-    if (Number.isNaN(parsedStart) || Number.isNaN(parsedEnd) || parsedStart >= parsedEnd) {
-      setError("Invalid prefilled time range");
-      onPrefillApplied?.();
-      return;
-    }
-
-    setMode("TIME");
-    setTimeStartAt(prefill.startAt);
-    setTimeEndAt(prefill.endAt);
-    setTimeBuildingId(prefill.buildingId ?? "");
-    setShowOnlyAvailableRooms(false);
-    setFocusedRoomId(prefill.focusRoomId ?? null);
-
-    void runTimeSearch({
-      startAt: prefill.startAt,
-      endAt: prefill.endAt,
-      buildingId: prefill.buildingId,
-    });
-
-    onPrefillApplied?.();
-  }, [onPrefillApplied, prefill, runTimeSearch]);
-
-  const handleTimeSearch = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-
-    if (!timeStartAt || !timeEndAt) {
-      setError("Start and end times are required");
-      return;
-    }
-
-    const parsedStart = new Date(timeStartAt).getTime();
-    const parsedEnd = new Date(timeEndAt).getTime();
-    if (Number.isNaN(parsedStart) || Number.isNaN(parsedEnd) || parsedStart >= parsedEnd) {
-      setError("Start must be earlier than end");
-      return;
-    }
-
-    setFocusedRoomId(null);
-
-    await runTimeSearch({
-      startAt: timeStartAt,
-      endAt: timeEndAt,
-      buildingId: timeBuildingId === "" ? undefined : timeBuildingId,
+      return (
+        <div
+          key={`segment-${idx}`}
+          className={`absolute transition-colors ${bgColor} ${cursor} overflow-hidden flex items-center justify-center`}
+          style={{
+            left: `${left}%`,
+            width: `${width}%`,
+            minWidth: '2px',
+            top: '8px',
+            bottom: '8px',
+            border: '1px solid rgba(0, 0, 0, 0.1)',
+          }}
+          title={
+            isAvailable
+              ? `Available: ${formatTime(segment.start)} - ${formatTime(segment.end)}`
+              : `Booked: ${formatTime(segment.start)} - ${formatTime(segment.end)}`
+          }
+          onClick={() => {
+            if (isAvailable && onSlotClick) {
+              onSlotClick(room.id, room.buildingId, segment.start, segment.end);
+            }
+          }}
+        />
+      );
     });
   };
 
-  const handleRoomSearch = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-
-    if (!roomDate || !roomStartTime || !roomEndTime) {
-      setError("Date, start time, and end time are required");
-      return;
-    }
-
-    if (roomBuildingId === "" || roomId === "") {
-      setError("Building and room are required");
-      return;
-    }
-
-    const startMinutes = parseTimeToMinutes(roomStartTime);
-    const endMinutes = parseTimeToMinutes(roomEndTime);
-    if (startMinutes === null || endMinutes === null || startMinutes >= endMinutes) {
-      setError("Start time must be earlier than end time");
-      return;
-    }
-
-    const windowStart = buildLocalDateTime(roomDate, startMinutes);
-    const windowEnd = buildLocalDateTime(roomDate, endMinutes);
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const bookings = await getRoomAvailability(roomId, windowStart, windowEnd);
-      const nextTimeBands = buildContinuousBands(windowStart, windowEnd, bookings);
-
-      const selectedBuilding = buildings.find((building) => building.id === roomBuildingId);
-      const selectedRoom = rooms.find((room) => room.id === roomId);
-
-      setRoomTimeBands(nextTimeBands);
-      setRoomSearchMeta({
-        buildingName: selectedBuilding?.name ?? "Selected building",
-        roomName: selectedRoom?.name ?? "Selected room",
-        date: roomDate,
-        startAt: windowStart,
-        endAt: windowEnd,
-      });
-      setTimeResults(null);
-      setFocusedRoomId(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to check room availability");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const availableRooms = roomCards.filter((card) => card.isAvailable).length;
-  const bookedRooms = roomCards.length - availableRooms;
-
-  const availableTimeBands = roomTimeBands?.filter((band) => band.isAvailable).length ?? 0;
-  const bookedTimeBands = (roomTimeBands?.length ?? 0) - availableTimeBands;
-
-  const selectedRoomId = typeof roomId === "number" ? roomId : null;
-  const selectedBuildingId = typeof roomBuildingId === "number" ? roomBuildingId : undefined;
-  const canRequestFromTimeResults = canRequestBooking && Boolean(onRequestBooking);
-  const canRequestFromBands =
-    canRequestBooking &&
-    Boolean(onRequestBooking) &&
-    selectedRoomId !== null;
+  if (isLoading) {
+    return (
+      <div className="grid border-b border-gray-200" style={{ gridTemplateColumns: '200px 1fr' }}>
+        <div className="bg-gray-100 border-r border-gray-300 p-3 animate-pulse" style={{ height: '80px' }}></div>
+        <div className="bg-gray-50 animate-pulse" style={{ height: '80px' }}></div>
+      </div>
+    );
+  }
 
   return (
-    <section>
-      <div className="page-header">
-        <h2>Availability</h2>
-        <p>Search by time or by building/room with fast visual status chips</p>
+    <div
+      className="grid border-b border-gray-200 cursor-pointer hover:bg-blue-50"
+      style={{
+        gridTemplateColumns: '200px 1fr',
+        backgroundColor: isSelected ? '#eff6ff' : roomIndex % 2 === 0 ? 'white' : '#f9fafb',
+      }}
+      onClick={onToggle}
+    >
+      {/* Room Column */}
+      <div className="p-3 font-medium text-sm text-gray-700 border-r border-gray-300 flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={isSelected}
+          onChange={onToggle}
+          onClick={(e) => e.stopPropagation()}
+          className="w-4 h-4 text-blue-500 rounded"
+        />
+        <span className="truncate">{room.name}</span>
       </div>
 
-      <form
-        className="card section-gap availability-search-card"
-        onSubmit={mode === "TIME" ? handleTimeSearch : handleRoomSearch}
+      {/* Timeline Column */}
+      <div className="relative h-20 bg-gray-50 border-l border-gray-200 overflow-x-auto" style={{ height: '80px', minHeight: '80px' }}>
+        {renderSegments()}
+      </div>
+    </div>
+  );
+}
+
+// Availability Grid Component
+function AvailabilityGrid({
+  roomId,
+  dates,
+  onRemoveDate,
+  onSelectDate,
+  timeRangeStart,
+  timeRangeEnd,
+  onSlotClick,
+  buildingId,
+}: {
+  roomId: number;
+  dates: string[];
+  onRemoveDate: (index: number) => void;
+  onSelectDate: (date: string) => void;
+  timeRangeStart: string;
+  timeRangeEnd: string;
+  onSlotClick?: (roomId: number, buildingId: number, startTime: string, endTime: string) => void;
+  buildingId?: number | null;
+}) {
+  // Convert time range to minutes for calculations
+  const [startHour, startMin] = timeRangeStart.split(':').map(Number);
+  const [endHour, endMin] = timeRangeEnd.split(':').map(Number);
+  const rangeStartMinutes = startHour * 60 + startMin;
+  const rangeEndMinutes = endHour * 60 + endMin;
+  
+  // Generate time labels with position info
+  const generateTimeLabels = () => {
+    const labels = [];
+    const totalMinutes = rangeEndMinutes - rangeStartMinutes || 1440;
+    
+    for (let i = 0; i < 5; i++) {
+      // Distribute labels evenly across the range (0, 0.25, 0.5, 0.75, 1.0)
+      const fraction = i / 4;
+      const minutes = rangeStartMinutes + (fraction * totalMinutes);
+      const h = Math.floor(minutes / 60) % 24;
+      const m = Math.floor(minutes % 60);
+      const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      labels.push({
+        time: timeStr,
+        percentage: fraction * 100,
+      });
+    }
+    return labels;
+  };
+
+  const timeLabels = generateTimeLabels();
+
+  return (
+    <div className="w-full">
+      {/* Header with time labels using Grid */}
+      <div className="grid border-b border-gray-300" style={{
+        gridTemplateColumns: '120px 1fr',
+      }}>
+        {/* Date Column Header */}
+        <div className="bg-gray-200 p-3 font-semibold text-sm text-gray-700 border-r border-gray-300 whitespace-nowrap overflow-hidden">
+          Date
+        </div>
+        {/* Timeline Column Header */}
+        <div className="relative h-16 bg-gray-100 border-b border-gray-300">
+          {/* Time labels with absolute positioning */}
+          {timeLabels.map((label, idx) => {
+            // Clamp position to keep labels within bounds
+            let transform = 'translateX(-50%)';
+            let left = label.percentage;
+            
+            // If at the start (0%), align left instead of center
+            if (idx === 0) {
+              transform = 'translateX(0)';
+              left = 0;
+            }
+            // If at the end (100%), align right instead of center
+            else if (idx === timeLabels.length - 1) {
+              transform = 'translateX(-100%)';
+              left = 100;
+            }
+            
+            return (
+              <div
+                key={idx}
+                className="absolute text-xs text-gray-600 font-semibold pointer-events-none whitespace-nowrap"
+                style={{
+                  left: `${left}%`,
+                  top: '4px',
+                  transform,
+                }}
+              >
+                {label.time}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Date rows using Grid */}
+      {dates.map((date, dateIdx) => (
+        <DateRow
+          key={date}
+          date={date}
+          dateIndex={dateIdx}
+          roomId={roomId}
+          canRemove={dates.length > 1}
+          onRemove={() => onRemoveDate(dateIdx)}
+          timeRangeStart={timeRangeStart}
+          timeRangeEnd={timeRangeEnd}
+          onSlotClick={onSlotClick}
+          buildingId={buildingId}
+        />
+      ))}
+
+      {/* Date Picker Row at Bottom */}
+      <div
+        className="grid border-t border-gray-300"
+        style={{
+          gridTemplateColumns: '120px 1fr',
+          backgroundColor: '#ffffff',
+        }}
       >
-        <div className="card-header">
-          <h3>Search</h3>
+        {/* Date Column (Fixed) */}
+        <div className="p-3 border-r border-gray-300 flex items-center">
+          <label className="text-xs font-medium text-gray-700 whitespace-nowrap">Select Date</label>
         </div>
-
-        <div className="availability-mode-switch" role="tablist" aria-label="Availability search mode">
-          <button
-            type="button"
-            className={`availability-mode-btn ${mode === "TIME" ? "active" : ""}`}
-            onClick={() => {
-              setMode("TIME");
-              setError(null);
-              setFocusedRoomId(null);
+        {/* Date Picker */}
+        <div className="p-3 flex items-center">
+          <input
+            type="date"
+            value={dates[dates.length - 1] || new Date().toISOString().split('T')[0]}
+            onChange={(e) => {
+              onSelectDate(e.target.value);
             }}
-          >
-            By Time
-          </button>
-          <button
-            type="button"
-            className={`availability-mode-btn ${mode === "BUILDING_ROOM" ? "active" : ""}`}
-            onClick={() => {
-              setMode("BUILDING_ROOM");
-              setError(null);
-              setFocusedRoomId(null);
-            }}
-          >
-            By Building/Room
-          </button>
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+          />
         </div>
+      </div>
+    </div>
+  );
+}
 
-        {mode === "TIME" ? (
-          <div className="form-row">
-            <div className="form-field">
-              <label htmlFor="availStartAt">Start</label>
-              <DateInput
-                id="availStartAt"
-                mode="datetime"
-                value={timeStartAt}
-                onChange={setTimeStartAt}
-              />
-            </div>
-            <div className="form-field">
-              <label htmlFor="availEndAt">End</label>
-              <DateInput
-                id="availEndAt"
-                mode="datetime"
-                value={timeEndAt}
-                onChange={setTimeEndAt}
-              />
-            </div>
-            <div className="form-field">
-              <label htmlFor="availBuilding">Building (optional)</label>
-              <select
-                id="availBuilding"
-                className="input"
-                value={timeBuildingId}
-                onChange={(e) => setTimeBuildingId(e.target.value === "" ? "" : Number(e.target.value))}
-              >
-                <option value="">All Buildings</option>
-                {buildings.map((building) => (
-                  <option key={building.id} value={building.id}>{building.name}</option>
-                ))}
-              </select>
-            </div>
+// Date Row Component
+function DateRow({
+  date,
+  dateIndex,
+  roomId,
+  canRemove,
+  onRemove,
+  timeRangeStart,
+  timeRangeEnd,
+  onSlotClick,
+  buildingId,
+}: {
+  date: string;
+  dateIndex: number;
+  roomId: number;
+  canRemove: boolean;
+  onRemove: () => void;
+  timeRangeStart: string;
+  timeRangeEnd: string;
+  onSlotClick?: (roomId: number, buildingId: number, startTime: string, endTime: string) => void;
+  buildingId?: number | null;
+}) {
+  const { data: timelineData, isLoading, error } = useRoomDayTimeline(roomId, date, true);
+
+  // Convert time range to minutes
+  const [startHour, startMin] = timeRangeStart.split(':').map(Number);
+  const [endHour, endMin] = timeRangeEnd.split(':').map(Number);
+  const rangeStartMinutes = startHour * 60 + startMin;
+  const rangeEndMinutes = endHour * 60 + endMin;
+
+  const formatDate = (dateStr: string) => {
+    const dateObj = new Date(dateStr);
+    const weekday = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+    const month = dateObj.toLocaleDateString('en-US', { month: 'short' });
+    const day = dateObj.getDate();
+    return `${day} ${month}, ${weekday}`;
+  };
+
+  // Get error status code
+  const errorStatus = (error as any)?.response?.status;
+  const isRateLimited = errorStatus === 429;
+  const errorMessage = isRateLimited 
+    ? 'Rate limited. Please wait and refresh.'
+    : error 
+    ? 'Failed to load data'
+    : null;
+
+  // Step 1: Normalize time - Convert ISO timestamp to minutes from day start
+  const getMinutesFromDayStart = (isoString: string, dayDate: string): number => {
+    const segmentDate = new Date(isoString);
+    const dayStart = new Date(dayDate);
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const diffMs = segmentDate.getTime() - dayStart.getTime();
+    return Math.round(diffMs / (1000 * 60)); // Convert to minutes
+  };
+
+  // Step 2: Compute layout metrics - Convert duration to percentage based on time range
+  const getSegmentWidth = (startMin: number, endMin: number): number => {
+    const totalDuration = rangeEndMinutes - rangeStartMinutes || 1440;
+    // Clamp segment to visible range
+    const clampedStart = Math.max(startMin, rangeStartMinutes);
+    const clampedEnd = Math.min(endMin, rangeEndMinutes);
+    
+    if (clampedStart >= clampedEnd) return 0; // Outside range
+    
+    const duration = clampedEnd - clampedStart;
+    return (duration / totalDuration) * 100;
+  };
+
+  // Get segment left position relative to time range
+  const getSegmentLeft = (startMin: number): number => {
+    const totalDuration = rangeEndMinutes - rangeStartMinutes || 1440;
+    const positionInRange = Math.max(0, startMin - rangeStartMinutes);
+    return (positionInRange / totalDuration) * 100;
+  };
+
+  // Helper function to format time for tooltips
+  const formatTime = (isoString: string): string => {
+    const dateObj = new Date(isoString);
+    const h = dateObj.getUTCHours().toString().padStart(2, '0');
+    const m = dateObj.getUTCMinutes().toString().padStart(2, '0');
+    return `${h}:${m}`;
+  };
+
+  // Step 4: Render segments with absolute positioning and percentage coordinates
+  const renderSegments = () => {
+    if (error) {
+      return (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-2">
+            <AlertCircle className="w-5 h-5 text-red-500" />
+            <span className="text-sm text-red-600">{errorMessage}</span>
           </div>
-        ) : (
-          <div className="form-row">
-            <div className="form-field">
-              <label htmlFor="availRoomDate">Date</label>
-              <DateInput
-                id="availRoomDate"
-                mode="date"
-                value={roomDate}
-                onChange={setRoomDate}
-              />
-            </div>
-            <div className="form-field">
-              <label htmlFor="availRoomStart">Start Time</label>
-              <DateInput
-                id="availRoomStart"
-                mode="time"
-                value={roomStartTime}
-                onChange={setRoomStartTime}
-              />
-            </div>
-            <div className="form-field">
-              <label htmlFor="availRoomEnd">End Time</label>
-              <DateInput
-                id="availRoomEnd"
-                mode="time"
-                value={roomEndTime}
-                onChange={setRoomEndTime}
-              />
-            </div>
-            <div className="form-field">
-              <label htmlFor="availRoomBuilding">Building</label>
-              <select
-                id="availRoomBuilding"
-                className="input"
-                value={roomBuildingId}
-                onChange={(e) => setRoomBuildingId(e.target.value === "" ? "" : Number(e.target.value))}
-              >
-                <option value="">Select building</option>
-                {buildings.map((building) => (
-                  <option key={building.id} value={building.id}>{building.name}</option>
-                ))}
-              </select>
-            </div>
-            <div className="form-field">
-              <label htmlFor="availRoomId">Room</label>
-              <select
-                id="availRoomId"
-                className="input"
-                value={roomId}
-                onChange={(e) => setRoomId(e.target.value === "" ? "" : Number(e.target.value))}
-                disabled={roomBuildingId === "" || rooms.length === 0}
-              >
-                <option value="">{roomBuildingId === "" ? "Select building first" : "Select room"}</option>
-                {rooms.map((room) => (
-                  <option key={room.id} value={room.id}>{room.name}</option>
-                ))}
-              </select>
-            </div>
-          </div>
+        </div>
+      );
+    }
+
+    if (!timelineData?.segments || timelineData.segments.length === 0) {
+      return (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">
+          No data
+        </div>
+      );
+    }
+
+    return timelineData.segments.map((segment, idx) => {
+      const startMin = getMinutesFromDayStart(segment.start, date);
+      const endMin = getMinutesFromDayStart(segment.end, date);
+      const width = getSegmentWidth(startMin, endMin);
+      const left = getSegmentLeft(startMin);
+
+      // Don't render segments outside the time range
+      if (width === 0 || startMin >= rangeEndMinutes || endMin <= rangeStartMinutes) {
+        return null;
+      }
+
+      // Step 3: Determine styling based on status
+      const isAvailable = segment.status === 'free';
+      const bgColor = isAvailable ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-red-500 hover:bg-red-600';
+      const cursor = isAvailable ? 'cursor-pointer' : 'cursor-default';
+
+
+      return (
+        <div
+          key={`segment-${idx}`}
+          className={`absolute transition-colors ${bgColor} ${cursor} overflow-hidden flex items-center justify-center`}
+          style={{
+            left: `${left}%`,
+            width: `${width}%`,
+            minWidth: '2px',
+            top: '8px',
+            bottom: '8px',
+            border: '1px solid rgba(0, 0, 0, 0.1)',
+          }}
+          title={
+            isAvailable
+              ? `Available: ${formatTime(segment.start)} - ${formatTime(segment.end)}`
+              : `Booked: ${formatTime(segment.start)} - ${formatTime(segment.end)}`
+          }
+          onClick={() => {
+            if (isAvailable && onSlotClick && buildingId) {
+              onSlotClick(roomId, buildingId, segment.start, segment.end);
+            }
+          }}
+        >
+          {width > 5 && (
+            <span className="text-xs text-white font-semibold px-1 truncate">
+              {isAvailable ? 'Free' : 'Booked'}
+            </span>
+          )}
+        </div>
+      );
+    });
+  };
+
+  if (isLoading) {
+    return (
+      <div className="grid border-b border-gray-200" style={{ gridTemplateColumns: '120px 1fr' }}>
+        <div className="w-32 bg-gray-100 border-r border-gray-300 p-3 animate-pulse" style={{ height: '80px' }}></div>
+        <div className="bg-gray-50 animate-pulse" style={{ height: '80px' }}></div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="grid border-b border-gray-200"
+      style={{
+        gridTemplateColumns: '120px 1fr',
+        backgroundColor: dateIndex % 2 === 0 ? 'white' : '#f9fafb',
+      }}
+    >
+      {/* Date Column (Fixed) */}
+      <div 
+        className="p-3 font-medium text-sm text-gray-700 border-r border-gray-300 flex items-center justify-between gap-2 whitespace-nowrap overflow-hidden"
+        title={`${formatDate(date)} (${date})`}
+      >
+        <span className="truncate">{formatDate(date)}</span>
+        {canRemove && (
+          <button
+            onClick={onRemove}
+            className="text-gray-400 hover:text-red-600 transition-colors flex-shrink-0"
+            title="Remove date"
+          >
+            <X className="w-4 h-4" />
+          </button>
         )}
+      </div>
 
-        <div className="availability-submit-row">
-          <button type="submit" className="btn btn-primary" disabled={loading}>
-            {loading ? "Searching..." : mode === "TIME" ? "Search Rooms" : "Search Time Slots"}
-          </button>
-          {mode === "TIME" && (
-            <label className="availability-filter-toggle" htmlFor="onlyAvailableRooms">
-              <input
-                id="onlyAvailableRooms"
-                type="checkbox"
-                checked={showOnlyAvailableRooms}
-                onChange={(event) => setShowOnlyAvailableRooms(event.target.checked)}
-              />
-              <span>Only available rooms</span>
-            </label>
-          )}
-        </div>
-      </form>
-
-      {error && <div className="alert alert-error">{error}</div>}
-      {loading && <p className="loading-text">Searching...</p>}
-
-      {mode === "TIME" && timeResults !== null && !loading && (
-        <>
-          {roomCards.length === 0 ? (
-            <p className="empty-text">
-              {showOnlyAvailableRooms
-                ? "No available rooms found for this time range."
-                : "No rooms found for the selected time range."}
-            </p>
-          ) : (
-            <div className="card section-gap availability-result-card">
-              <div className="availability-result-summary">
-                <div>
-                  <h3>Building-Room Status</h3>
-                  <p className="availability-window">
-                    {formatDateTimeDDMMYYYY(timeStartAt)} - {formatDateTimeDDMMYYYY(timeEndAt)}
-                  </p>
-                </div>
-                <div className="availability-counts">
-                  <span className="badge badge-available">{availableRooms} available</span>
-                  <span className="badge badge-occupied">{bookedRooms} booked</span>
-                </div>
-              </div>
-
-              <div className="availability-legend">
-                <span className="availability-legend-item is-available">Available</span>
-                <span className="availability-legend-item is-booked">Booked</span>
-              </div>
-
-              <div className="availability-building-groups">
-                {groupedTimeResults?.map((buildingGroup) => (
-                  <div key={buildingGroup.buildingId} className="availability-building-group">
-                    <div className="availability-building-title">{buildingGroup.buildingName}</div>
-                    <div className="availability-chip-row">
-                      {buildingGroup.rooms.map((room) => (
-                        <div
-                          key={`${buildingGroup.buildingId}-${room.id}`}
-                          className={`availability-chip ${room.isAvailable ? "is-available" : "is-booked"}${focusedRoomId === room.id ? " is-focused" : ""}`}
-                        >
-                          <span className="availability-chip-title">{room.name}</span>
-                          <span className="availability-chip-status">
-                            {room.isAvailable ? "Available" : "Booked"}
-                          </span>
-                          {canRequestFromTimeResults && room.isAvailable && (
-                            <button
-                              type="button"
-                              className="availability-chip-action"
-                              onClick={() => {
-                                onRequestBooking?.({
-                                  roomId: room.id,
-                                  buildingId: buildingGroup.buildingId,
-                                  startAt: timeStartAt,
-                                  endAt: timeEndAt,
-                                });
-                              }}
-                            >
-                              Request
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {mode === "BUILDING_ROOM" && roomTimeBands !== null && !loading && (
-        <>
-          {roomTimeBands.length === 0 ? (
-            <p className="empty-text">No time slots in the selected window.</p>
-          ) : (
-            <div className="card section-gap availability-result-card">
-              <div className="availability-result-summary">
-                <div>
-                  <h3>Time Slot Status</h3>
-                  {roomSearchMeta && (
-                    <p className="availability-window">
-                      {roomSearchMeta.buildingName} - {roomSearchMeta.roomName} | {formatDateDDMMYYYY(roomSearchMeta.date)}
-                    </p>
-                  )}
-                  {roomSearchMeta && (
-                    <p className="availability-window">
-                      {formatDateTimeDDMMYYYY(roomSearchMeta.startAt)} - {formatDateTimeDDMMYYYY(roomSearchMeta.endAt)}
-                    </p>
-                  )}
-                </div>
-                <div className="availability-counts">
-                  <span className="badge badge-available">{availableTimeBands} available bands</span>
-                  <span className="badge badge-occupied">{bookedTimeBands} booked bands</span>
-                </div>
-              </div>
-
-              <div className="availability-legend">
-                <span className="availability-legend-item is-available">Available</span>
-                <span className="availability-legend-item is-booked">Booked</span>
-              </div>
-
-              <div className="availability-chip-row availability-time-row">
-                {roomTimeBands.map((band) => (
-                  <div
-                    key={`${band.startAt}-${band.endAt}`}
-                    className={`availability-chip availability-chip-time ${band.isAvailable ? "is-available" : "is-booked"}`}
-                  >
-                    <span className="availability-chip-title">
-                      {toTimeLabel(band.startAt)} - {toTimeLabel(band.endAt)}
-                    </span>
-                    <span className="availability-chip-status">
-                      {band.isAvailable ? "Available" : "Booked"}
-                    </span>
-                    {canRequestFromBands && band.isAvailable && (
-                      <button
-                        type="button"
-                        className="availability-chip-action"
-                        onClick={() => {
-                          onRequestBooking?.({
-                            roomId: selectedRoomId,
-                            buildingId: selectedBuildingId,
-                            startAt: band.startAt,
-                            endAt: band.endAt,
-                          });
-                        }}
-                      >
-                        Request
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </section>
+      {/* Timeline Column (Flexible, with absolute positioned segments) */}
+      <div className="relative bg-gray-50 border-l border-gray-200 overflow-x-auto" style={{ height: '80px', minHeight: '80px' }}>
+        {renderSegments()}
+      </div>
+    </div>
   );
 }

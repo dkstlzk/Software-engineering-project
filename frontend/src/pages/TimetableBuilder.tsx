@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
   addDayLane as apiAddDayLane,
   createBooking as apiCreateBooking,
-  commitTimetableImport as apiCommitTimetableImport,
-  deleteTimetableImportBatch as apiDeleteTimetableImportBatch,
+  createRoom as apiCreateRoom,
+
   getTimetableImportBatch as apiGetTimetableImportBatch,
   getTimetableImportBatches as apiGetTimetableImportBatches,
   deleteBooking as apiDeleteBooking,
@@ -27,10 +27,22 @@ import {
   getTimetableImportProcessedRows as apiGetTimetableImportProcessedRows,
   previewTimetableImport as apiPreviewTimetableImport,
   saveTimetableImportDecisions as apiSaveTimetableImportDecisions,
-  transferTimetableImportRow as apiTransferTimetableImportRow,
   updateBooking as apiUpdateBooking,
   updateTimeBand as apiUpdateTimeBand,
-} from "../api/api";
+  startCommitSession as apiStartCommitSession,
+  startEditCommitSession as apiStartEditCommitSession,
+  runExternalCommitCheck as apiRunExternalCommitCheck,
+  resolveExternalCommitConflicts as apiResolveExternalCommitConflicts,
+  runInternalCommitCheck as apiRunInternalCommitCheck,
+  resolveInternalCommitConflicts as apiResolveInternalCommitConflicts,
+  startCommitFreeze as apiStartCommitFreeze,
+  runRuntimeCommitCheck as apiRunRuntimeCommitCheck,
+  resolveRuntimeCommitConflicts as apiResolveRuntimeCommitConflicts,
+  finalizeCommitSession as apiFinalizeCommitSession,
+  cancelCommitSession as apiCancelCommitSession,
+  previewSlotSystemChanges as apiPreviewSlotSystemChanges,
+
+} from "../lib/api";
 import type {
   Building,
   DayOfWeek,
@@ -47,10 +59,26 @@ import type {
   TimetableImportPreviewRow,
   TimetableImportPreviewReport,
   TimetableImportSavedDecision,
-} from "../api/api";
+  CommitStageReport,
+  CommitSessionResolutionDecision,
+  CommitResolutionAction,
+  CommitResolutionTarget,
+  CommitSessionStage,
+  ChangePreviewResult,
+  EditCommitSessionStartResponse,
+  TimetableSnapshotState,
+
+} from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import { formatDateDDMMYYYY } from "../utils/datetime";
 import { DateInput } from "../components/DateInput";
+import {
+  formatBookingImpactMessage,
+  formatEditDiffSummary,
+  groupOperationsByGroupId,
+  mapEditStartErrorToMessage,
+  shouldShowPruneConfirmation,
+} from "./timetableEditUtils";
 
 const DAY_OF_WEEK_OPTIONS: DayOfWeek[] = [
   "MON",
@@ -89,6 +117,17 @@ type ProcessedBookingEditState = {
 };
 
 type RowDecisionAction = "AUTO" | "IGNORE" | "RESOLVE" | "SKIP";
+
+type ConflictResolutionDraft = {
+  action: CommitResolutionAction;
+  target?: CommitResolutionTarget;
+  roomId?: number;
+  startAt?: string;
+  endAt?: string;
+  roomResolutionMode?: "SELECT_EXISTING" | "CREATE_ROOM";
+  createRoomBuildingId?: number | "";
+  createRoomName?: string;
+};
 
 type RowDecisionState = {
   action: RowDecisionAction;
@@ -318,6 +357,32 @@ function toConflictWindowRange(startAt: string, endAt: string): string {
   return `${start.toLocaleString()} - ${end.toLocaleString()}`;
 }
 
+function toSnapshotStateFromGrid(grid: SlotFullGrid): TimetableSnapshotState {
+  return {
+    slotSystemId: grid.slotSystem.id,
+    days: grid.days.map((day) => ({
+      id: day.id,
+      dayOfWeek: day.dayOfWeek,
+      orderIndex: day.orderIndex,
+      laneCount: day.laneCount,
+    })),
+    timeBands: grid.timeBands.map((band) => ({
+      id: band.id,
+      startTime: String(band.startTime),
+      endTime: String(band.endTime),
+      orderIndex: band.orderIndex,
+    })),
+    blocks: grid.blocks.map((block) => ({
+      id: block.id,
+      dayId: block.dayId,
+      startBandId: block.startBandId,
+      laneIndex: block.laneIndex,
+      rowSpan: block.rowSpan,
+      label: block.label,
+    })),
+  };
+}
+
 function showConflictingBookingsPopup(
   report: TimetableImportCommitReport,
   operationLabel: string,
@@ -347,7 +412,107 @@ function showConflictingBookingsPopup(
   );
 }
 
-export function TimetableBuilderPage() {
+function toCommitStageLabel(stage: CommitSessionStage): string {
+  if (stage === "external") {
+    return "External";
+  }
+
+  if (stage === "internal") {
+    return "Internal";
+  }
+
+  return "Runtime";
+}
+
+function readMetadataNumber(metadata: Record<string, unknown>, key: string): number | null {
+  const value = metadata[key];
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function readMetadataString(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function isRateLimitError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const normalized = error.message.toLowerCase();
+  return (
+    normalized.includes("too many requests") ||
+    normalized.includes("rate limit") ||
+    normalized.includes("request failed (429)") ||
+    normalized.includes(" 429")
+  );
+}
+
+export type TimetableBuilderView = "all" | "structure" | "imports" | "processed" | "workspace";
+
+type TimetableBuilderPageProps = {
+  view?: TimetableBuilderView;
+};
+
+type CommitPipelineStep =
+  | "IDLE"
+  | "SESSION_STARTED"
+  | "EXTERNAL_CHECK"
+  | "EXTERNAL_CONFLICTS"
+  | "EXTERNAL_RESOLVED"
+  | "INTERNAL_CHECK"
+  | "INTERNAL_CONFLICTS"
+  | "INTERNAL_RESOLVED"
+  | "FREEZE"
+  | "RUNTIME_CHECK"
+  | "RUNTIME_CONFLICTS"
+  | "RUNTIME_RESOLVED"
+  | "FINALIZE"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "FAILED";
+
+function toCommitPipelineLabel(step: CommitPipelineStep): string {
+  switch (step) {
+    case "IDLE":
+      return "Idle";
+    case "SESSION_STARTED":
+      return "Session started";
+    case "EXTERNAL_CHECK":
+      return "External check";
+    case "EXTERNAL_CONFLICTS":
+      return "External conflicts";
+    case "EXTERNAL_RESOLVED":
+      return "External resolved";
+    case "INTERNAL_CHECK":
+      return "Internal check";
+    case "INTERNAL_CONFLICTS":
+      return "Internal conflicts";
+    case "INTERNAL_RESOLVED":
+      return "Internal resolved";
+    case "FREEZE":
+      return "Freeze acquired";
+    case "RUNTIME_CHECK":
+      return "Runtime check";
+    case "RUNTIME_CONFLICTS":
+      return "Runtime conflicts";
+    case "RUNTIME_RESOLVED":
+      return "Runtime resolved";
+    case "FINALIZE":
+      return "Finalizing";
+    case "COMPLETED":
+      return "Completed";
+    case "CANCELLED":
+      return "Cancelled";
+    case "FAILED":
+      return "Failed";
+    default:
+      return "Idle";
+  }
+}
+
+export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps = {}) {
   const { user } = useAuth();
   const isAdmin = user?.role === "ADMIN";
 
@@ -383,7 +548,7 @@ export function TimetableBuilderPage() {
   const [commitLoading, setCommitLoading] = useState(false);
   const [saveDecisionsLoading, setSaveDecisionsLoading] = useState(false);
   const [reallocateLoading, setReallocateLoading] = useState(false);
-  const [deleteBatchLoading, setDeleteBatchLoading] = useState(false);
+  const [deleteBatchLoading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importInfo, setImportInfo] = useState<string | null>(null);
 
@@ -406,11 +571,40 @@ export function TimetableBuilderPage() {
   const [deletingBookingId, setDeletingBookingId] = useState<number | null>(null);
   const [creatingRowId, setCreatingRowId] = useState<number | null>(null);
   const [creatingResolveSlotRowId, setCreatingResolveSlotRowId] = useState<number | null>(null);
-  const [movingRowId, setMovingRowId] = useState<number | null>(null);
   const [rowDecisions, setRowDecisions] = useState<Record<number, RowDecisionState>>({});
-  const [rowMoveTargetById, setRowMoveTargetById] = useState<Record<number, number | "">>({});
 
   const [dragSelection, setDragSelection] = useState<DragSelection | null>(null);
+
+  // Conflict-aware commit state
+  const [commitSessionId, setCommitSessionId] = useState<number | null>(null);
+  const [conflictStage, setConflictStage] = useState<CommitSessionStage | null>(null);
+  const [conflictReport, setConflictReport] = useState<CommitStageReport | null>(null);
+  const [conflictResolutions, setConflictResolutions] = useState<
+    Record<string, ConflictResolutionDraft>
+  >({});
+  const [conflictLoading, setConflictLoading] = useState(false);
+  const [showConflictDialog, setShowConflictDialog] = useState(false);
+  const [isCommitFreezeActive, setIsCommitFreezeActive] = useState(false);
+  const [commitPipelineStep, setCommitPipelineStep] = useState<CommitPipelineStep>("IDLE");
+  const [commitFlowContext, setCommitFlowContext] = useState<"import" | "edit" | null>(null);
+  const [commitTargetSlotSystemId, setCommitTargetSlotSystemId] = useState<number | null>(null);
+
+  // Change workspace state
+  const [showChangeWorkspace, setShowChangeWorkspace] = useState(false);
+  const [changePreview, setChangePreview] = useState<ChangePreviewResult | null>(null);
+  const [changeLoading, setChangeLoading] = useState(false);
+  const [changeError, setChangeError] = useState<string | null>(null);
+  const [changeSuccess, setChangeSuccess] = useState<string | null>(null);
+  const [editPruneBookings, setEditPruneBookings] = useState(true);
+  const [editStartLoading, setEditStartLoading] = useState(false);
+  const [editStartResult, setEditStartResult] =
+    useState<EditCommitSessionStartResponse | null>(null);
+  const [editDraftJson, setEditDraftJson] = useState("");
+  const [workspaceAutoOpenedForSystemId, setWorkspaceAutoOpenedForSystemId] = useState<number | null>(null);
+  const [editSessionStatus, setEditSessionStatus] = useState<"VIEW" | "EDITING" | "COMMITTING">("VIEW");
+  const [showPruneConfirmation, setShowPruneConfirmation] = useState(false);
+  const [pendingPruneBookingCount, setPendingPruneBookingCount] = useState(0);
+  const [maintenanceTab, setMaintenanceTab] = useState<"SLOT_SYSTEM" | "DANGER_ZONE">("SLOT_SYSTEM");
 
   const days: SlotDay[] = grid?.days ?? [];
   const timeBands: SlotTimeBand[] = grid?.timeBands ?? [];
@@ -423,8 +617,7 @@ export function TimetableBuilderPage() {
     saveDecisionsLoading ||
     reallocateLoading ||
     deleteBatchLoading ||
-    creatingResolveSlotRowId !== null ||
-    movingRowId !== null;
+    creatingResolveSlotRowId !== null;
 
   const slotLabelOptions = useMemo(() => {
     const labels = Array.from(
@@ -446,8 +639,8 @@ export function TimetableBuilderPage() {
     const map = new Map<number, string>();
 
     for (const room of rooms) {
-      const buildingLabel = buildingNameById.get(room.buildingId) ?? `Building #${room.buildingId}`;
-      map.set(room.id, `${buildingLabel} - ${room.name} (#${room.id})`);
+      const buildingLabel = buildingNameById.get(room.buildingId) ?? "Unknown Building";
+      map.set(room.id, `${buildingLabel} - ${room.name}`);
     }
 
     return map;
@@ -594,6 +787,15 @@ export function TimetableBuilderPage() {
     return slotSystems.find((system) => system.id === selectedSystemId) ?? null;
   }, [selectedSystemId, slotSystems]);
 
+  const isSystemLocked = selectedSystem?.isLocked ?? false;
+  const lockedStructureEditMessage =
+    "Slot system is locked. Use Edit Structure to modify days, time bands, lanes, or blocks.";
+  const showStructureSection = view === "all" || view === "structure" || view === "workspace";
+  const showImportSection = view === "all" || view === "imports" || view === "processed";
+  const showImportControls = view === "all" || view === "imports";
+  const showProcessedSection = view === "all" || view === "processed";
+  const showGridSection = view === "all" || view === "structure" || view === "workspace";
+
   const previewRowById = useMemo(() => {
     return new Map<number, TimetableImportPreviewRow>(
       (previewReport?.rows ?? []).map((row) => [row.rowId, row]),
@@ -684,7 +886,7 @@ export function TimetableBuilderPage() {
           return previewReport.batchId;
         }
 
-        return "";
+        return batches[0]?.batchId ?? "";
       });
     } catch (e) {
       setImportBatches([]);
@@ -697,7 +899,6 @@ export function TimetableBuilderPage() {
   const hydratePreviewFromBatch = (report: TimetableImportPreviewReport) => {
     setPreviewReport(report);
     setRowDecisions(buildRowDecisionsFromReport(report));
-    setRowMoveTargetById({});
     setImportTermStart(toDateOnlyInputValue(report.termStartDate));
     setImportTermEnd(toDateOnlyInputValue(report.termEndDate));
     setSelectedBatchId(report.batchId);
@@ -765,6 +966,22 @@ export function TimetableBuilderPage() {
       setProcessedRowsLoading(false);
     }
   };
+
+  const handleLoadImportBatch = useCallback(async (batchId: number) => {
+    setImportLoading(true);
+    setImportError(null);
+    setImportInfo(null);
+
+    try {
+      const report = await apiGetTimetableImportBatch(batchId);
+      hydratePreviewFromBatch(report);
+      await loadProcessedRows(report.batchId);
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Failed to load import batch");
+    } finally {
+      setImportLoading(false);
+    }
+  }, []);
 
   const updateProcessedBookingEdit = (
     bookingId: number,
@@ -835,6 +1052,15 @@ export function TimetableBuilderPage() {
   };
 
   const handleDeleteProcessedBooking = async (batchId: number, bookingId: number) => {
+    const approved =
+      typeof window === "undefined"
+        ? true
+        : window.confirm("Delete this booking? This action cannot be undone.");
+
+    if (!approved) {
+      return;
+    }
+
     setDeletingBookingId(bookingId);
     setProcessedRowsError(null);
 
@@ -896,6 +1122,33 @@ export function TimetableBuilderPage() {
     void loadImportBatches(selectedSystemId);
   }, [selectedSystemId]);
 
+  useEffect(() => {
+    if (view !== "processed") {
+      return;
+    }
+
+    if (selectedBatchId === "" || importLoading || processedRowsLoading) {
+      return;
+    }
+
+    const hasPreview = previewReport?.batchId === selectedBatchId;
+    const hasProcessedRows = processedRowsReport?.batchId === selectedBatchId;
+
+    if (hasPreview && hasProcessedRows) {
+      return;
+    }
+
+    void handleLoadImportBatch(selectedBatchId);
+  }, [
+    view,
+    selectedBatchId,
+    importLoading,
+    processedRowsLoading,
+    previewReport?.batchId,
+    processedRowsReport?.batchId,
+    handleLoadImportBatch,
+  ]);
+
   const handleCreateSlotSystem = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
@@ -922,6 +1175,18 @@ export function TimetableBuilderPage() {
 
   const handleDeleteSlotSystem = async () => {
     if (selectedSystemId === "") {
+      return;
+    }
+
+    const selectedLabel = selectedSystem?.name ?? "this slot system";
+    const approved =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(
+            `Delete slot system "${selectedLabel}"? This removes its grid structure and cannot be undone.`,
+          );
+
+    if (!approved) {
       return;
     }
 
@@ -970,13 +1235,13 @@ export function TimetableBuilderPage() {
       return;
     }
 
-    const selectedLabel = selectedSystem?.name ?? `#${selectedSystemId}`;
+    const selectedLabel = selectedSystem?.name ?? "Unknown";
 
     const approved =
       typeof window === "undefined"
         ? true
         : window.confirm(
-            `Prune imported bookings linked to slot system \"${selectedLabel}\"? This keeps manual bookings and cannot be undone.`,
+            `Prune imported bookings linked to slot system "${selectedLabel}"? This keeps manual bookings and cannot be undone.`,
           );
 
     if (!approved) {
@@ -1008,6 +1273,11 @@ export function TimetableBuilderPage() {
       return;
     }
 
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
+      return;
+    }
+
     setActionLoading(true);
     setError(null);
 
@@ -1029,6 +1299,11 @@ export function TimetableBuilderPage() {
 
     if (selectedSystemId === "") {
       setError("Select a slot system first");
+      return;
+    }
+
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
       return;
     }
 
@@ -1069,6 +1344,11 @@ export function TimetableBuilderPage() {
   };
 
   const handleUpdateTimeBand = async (bandId: number) => {
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
+      return;
+    }
+
     if (!editingBandStart || !editingBandEnd) {
       setError("Band start and end times are required");
       return;
@@ -1095,6 +1375,11 @@ export function TimetableBuilderPage() {
 
   const handleDeleteTimeBand = async (bandId: number) => {
     if (selectedSystemId === "") {
+      return;
+    }
+
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
       return;
     }
 
@@ -1126,6 +1411,11 @@ export function TimetableBuilderPage() {
 
   const createBlockFromSelection = async (selection: DragSelection) => {
     if (selectedSystemId === "") {
+      return;
+    }
+
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
       return;
     }
 
@@ -1165,6 +1455,12 @@ export function TimetableBuilderPage() {
       return;
     }
 
+    if (isSystemLocked) {
+      setDragSelection(null);
+      setError(lockedStructureEditMessage);
+      return;
+    }
+
     const activeSelection = dragSelection;
     setDragSelection(null);
     await createBlockFromSelection(activeSelection);
@@ -1172,6 +1468,21 @@ export function TimetableBuilderPage() {
 
   const handleDeleteBlock = async (blockId: number) => {
     if (selectedSystemId === "") {
+      return;
+    }
+
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
+      return;
+    }
+
+    const blockLabel = blocks.find((block) => block.id === blockId)?.label ?? `#${blockId}`;
+    const approved =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(`Delete block "${blockLabel}"?`);
+
+    if (!approved) {
       return;
     }
 
@@ -1193,6 +1504,11 @@ export function TimetableBuilderPage() {
       return;
     }
 
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
+      return;
+    }
+
     setActionLoading(true);
     setError(null);
 
@@ -1211,8 +1527,25 @@ export function TimetableBuilderPage() {
       return;
     }
 
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
+      return;
+    }
+
     if (day.laneCount <= 1) {
       setError("At least one lane must remain for a day");
+      return;
+    }
+
+    const dayLabel = DAY_LABELS[day.dayOfWeek];
+    const approved =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(
+            `Remove one lane from ${dayLabel}? This change cannot be undone.`,
+          );
+
+    if (!approved) {
       return;
     }
 
@@ -1231,6 +1564,11 @@ export function TimetableBuilderPage() {
 
   const handleDeleteDay = async (day: SlotDay) => {
     if (selectedSystemId === "") {
+      return;
+    }
+
+    if (isSystemLocked) {
+      setError(lockedStructureEditMessage);
       return;
     }
 
@@ -1261,7 +1599,7 @@ export function TimetableBuilderPage() {
     laneIndex: number,
     bandIndex: number,
   ) => {
-    if (actionLoading || loadingGrid || selectedSystemId === "") {
+    if (actionLoading || loadingGrid || selectedSystemId === "" || isSystemLocked) {
       return;
     }
 
@@ -1343,6 +1681,7 @@ export function TimetableBuilderPage() {
     setCommitReport(null);
     setProcessedRowsReport(null);
     setProcessedRowsError(null);
+    setCommitPipelineStep("IDLE");
 
     try {
       const aliasMap = parseAliasMap(aliasMapText);
@@ -1362,104 +1701,6 @@ export function TimetableBuilderPage() {
       setImportError(e instanceof Error ? e.message : "Failed to preview import");
     } finally {
       setImportLoading(false);
-    }
-  };
-
-  const loadImportBatchForEditing = async (batchId: number) => {
-    setImportLoading(true);
-    setImportError(null);
-    setImportInfo(null);
-    setCommitReport(null);
-
-    try {
-      const report = await apiGetTimetableImportBatch(batchId);
-
-      hydratePreviewFromBatch(report);
-
-      if (selectedSystemId !== report.slotSystemId) {
-        setSelectedSystemId(report.slotSystemId);
-      }
-
-      await loadProcessedRows(report.batchId);
-    } catch (e) {
-      setImportError(e instanceof Error ? e.message : "Failed to load import batch");
-    } finally {
-      setImportLoading(false);
-    }
-  };
-
-  const handleLoadSelectedBatch = async () => {
-    if (selectedBatchId === "") {
-      setImportError("Choose a batch to load");
-      return;
-    }
-
-    await loadImportBatchForEditing(selectedBatchId);
-  };
-
-  const handleRefreshBatchContext = async () => {
-    if (selectedSystemId === "") {
-      return;
-    }
-
-    const loadedBatchId = previewReport?.batchId;
-    const activeBatchId =
-      loadedBatchId ?? (selectedBatchId !== "" ? selectedBatchId : undefined);
-
-    setImportBatchesLoading(true);
-    setImportBatchesError(null);
-    setImportError(null);
-
-    try {
-      const batches = await apiGetTimetableImportBatches({
-        slotSystemId: selectedSystemId,
-        limit: 50,
-      });
-
-      setImportBatches(batches);
-
-      const activeBatchExists =
-        typeof activeBatchId === "number" &&
-        batches.some((batch) => batch.batchId === activeBatchId);
-
-      setSelectedBatchId((current) => {
-        if (current !== "" && batches.some((batch) => batch.batchId === current)) {
-          return current;
-        }
-
-        if (
-          typeof loadedBatchId === "number" &&
-          batches.some((batch) => batch.batchId === loadedBatchId)
-        ) {
-          return loadedBatchId;
-        }
-
-        return "";
-      });
-
-      if (!activeBatchExists) {
-        if (previewReport && activeBatchId === previewReport.batchId) {
-          setPreviewReport(null);
-          setRowDecisions({});
-          setCommitReport(null);
-          setProcessedRowsReport(null);
-          setProcessedRowsError(null);
-        }
-
-        return;
-      }
-
-      const refreshedReport = await apiGetTimetableImportBatch(activeBatchId);
-      hydratePreviewFromBatch(refreshedReport);
-
-      await loadGrid(refreshedReport.slotSystemId);
-      await loadProcessedRows(refreshedReport.batchId);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "Failed to refresh batch data";
-      setImportBatchesError(message);
-      setImportError(message);
-    } finally {
-      setImportBatchesLoading(false);
     }
   };
 
@@ -1634,68 +1875,6 @@ export function TimetableBuilderPage() {
     }
   };
 
-  const updateRowMoveTarget = (rowId: number, targetSlotSystemId: number | "") => {
-    setRowMoveTargetById((current) => ({
-      ...current,
-      [rowId]: targetSlotSystemId,
-    }));
-  };
-
-  const handleMoveRowToAnotherSlotSystem = async (row: TimetableImportPreviewRow) => {
-    if (!previewReport) {
-      return;
-    }
-
-    const targetSlotSystemId = rowMoveTargetById[row.rowId] ?? "";
-
-    if (targetSlotSystemId === "" || !Number.isInteger(targetSlotSystemId)) {
-      setImportError("Select a target slot system before transferring the row");
-      return;
-    }
-
-    if (targetSlotSystemId === previewReport.slotSystemId) {
-      setImportError("Choose a different slot system for transfer");
-      return;
-    }
-
-    const targetSlotSystem = slotSystems.find((system) => system.id === targetSlotSystemId);
-
-    if (!targetSlotSystem) {
-      setImportError("Target slot system no longer exists");
-      return;
-    }
-
-    const sourceBatchId = previewReport.batchId;
-    const sourceSlotSystemId = previewReport.slotSystemId;
-
-    setMovingRowId(row.rowId);
-    setImportError(null);
-    setImportInfo(null);
-
-    try {
-      const transferReport = await apiTransferTimetableImportRow(
-        sourceBatchId,
-        row.rowId,
-        targetSlotSystemId,
-      );
-
-      const refreshedSourceReport = await apiGetTimetableImportBatch(sourceBatchId);
-      hydratePreviewFromBatch(refreshedSourceReport);
-
-      await loadProcessedRows(sourceBatchId);
-      await loadImportBatches(sourceSlotSystemId);
-
-      setImportInfo(
-        `Transferred row ${row.rowIndex} to ${targetSlotSystem.name}. Linked batch #${transferReport.targetBatchId} now has ${transferReport.targetProcessedRows} row(s). Source row is marked Skip (Ignore semantics).`,
-      );
-    } catch (e) {
-      setImportError(e instanceof Error ? e.message : "Failed to transfer row to another slot system");
-    } finally {
-      setMovingRowId(null);
-      updateRowMoveTarget(row.rowId, "");
-    }
-  };
-
   const handleSaveImportDecisions = async () => {
     if (!previewReport) {
       return;
@@ -1711,7 +1890,7 @@ export function TimetableBuilderPage() {
 
       const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
       hydratePreviewFromBatch(refreshedReport);
-      setImportInfo(`Saved allocation decisions for batch #${refreshedReport.batchId}.`);
+      setImportInfo(`Saved allocation decisions.`);
 
       await loadGrid(refreshedReport.slotSystemId);
       await loadProcessedRows(refreshedReport.batchId);
@@ -1751,7 +1930,7 @@ export function TimetableBuilderPage() {
 
       const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
       hydratePreviewFromBatch(refreshedReport);
-      setImportInfo(`Reallocated committed batch #${refreshedReport.batchId}.`);
+      setImportInfo(`Allocation decisions reallocated.`);
 
       await loadGrid(refreshedReport.slotSystemId);
       await loadProcessedRows(previewReport.batchId);
@@ -1763,54 +1942,146 @@ export function TimetableBuilderPage() {
     }
   };
 
-  const handleDeleteSelectedBatch = async () => {
-    const activeBatchId = selectedBatchId !== "" ? selectedBatchId : previewReport?.batchId;
+  const clearCommitConflictState = () => {
+    setShowConflictDialog(false);
+    setConflictReport(null);
+    setConflictResolutions({});
+    setConflictStage(null);
+    setCommitSessionId(null);
+    setIsCommitFreezeActive(false);
+    setCommitFlowContext(null);
+    setCommitTargetSlotSystemId(null);
+  };
 
-    if (!activeBatchId) {
-      setImportError("Choose or load a batch first");
-      return;
-    }
-
-    const approved =
-      typeof window === "undefined"
-        ? true
-        : window.confirm(
-            `Delete batch #${activeBatchId}? This will remove all linked imported bookings and cannot be undone.`,
-          );
-
-    if (!approved) {
-      return;
-    }
-
-    setDeleteBatchLoading(true);
-    setImportError(null);
-    setImportInfo(null);
-
-    try {
-      const result = await apiDeleteTimetableImportBatch(activeBatchId);
-
-      if (previewReport?.batchId === activeBatchId) {
-        setPreviewReport(null);
-        setRowDecisions({});
-        setCommitReport(null);
-        setProcessedRowsReport(null);
-        setProcessedRowsError(null);
-        setProcessedBookingEdits({});
-        setNewRowBookingDrafts({});
+  const cleanupAfterRateLimitedCommitFailure = async (activeCommitSessionId: number | null) => {
+    if (activeCommitSessionId !== null) {
+      try {
+        await apiCancelCommitSession(activeCommitSessionId);
+      } catch {
+        // If cancellation is also throttled, still reset local state to avoid a stuck running UI.
       }
-
-      setSelectedBatchId("");
-      await loadImportBatches(selectedSystemId);
-
-      const bookingLabel = result.deletedBookings === 1 ? "booking" : "bookings";
-      setImportInfo(
-        `Deleted batch #${result.batchId} and removed ${result.deletedBookings} linked ${bookingLabel}.`,
-      );
-    } catch (e) {
-      setImportError(e instanceof Error ? e.message : "Failed to delete import batch");
-    } finally {
-      setDeleteBatchLoading(false);
     }
+
+    clearCommitConflictState();
+    setEditSessionStatus("VIEW");
+  };
+
+  const hydrateAfterFinalize = async (batchId: number) => {
+    const refreshedReport = await apiGetTimetableImportBatch(batchId);
+    hydratePreviewFromBatch(refreshedReport);
+
+    await loadGrid(refreshedReport.slotSystemId);
+    await loadProcessedRows(batchId);
+    await loadImportBatches(refreshedReport.slotSystemId);
+    await loadSlotSystems();
+  };
+
+  const runFreezeRuntimeAndFinalize = async (
+    activeCommitSessionId: number,
+    batchId: number,
+  ) => {
+    setCommitPipelineStep("FREEZE");
+    await apiStartCommitFreeze(activeCommitSessionId);
+    setIsCommitFreezeActive(true);
+
+    setCommitPipelineStep("RUNTIME_CHECK");
+    const runtimeReport = await apiRunRuntimeCommitCheck(activeCommitSessionId);
+
+    if (runtimeReport.conflictCount > 0) {
+      setCommitPipelineStep("RUNTIME_CONFLICTS");
+      setConflictStage("runtime");
+      setConflictReport(runtimeReport);
+      setConflictResolutions({});
+      setShowConflictDialog(true);
+      setEditSessionStatus("VIEW");
+      return;
+    }
+
+    setCommitPipelineStep("FINALIZE");
+    const finalizeReport = await apiFinalizeCommitSession(activeCommitSessionId);
+    setCommitReport(null);
+    setCommitPipelineStep("COMPLETED");
+    clearCommitConflictState();
+    setImportInfo(
+      `Commit completed. Created ${finalizeReport.createdBookings} bookings and skipped ${finalizeReport.skippedOperations} operation(s).`,
+    );
+    await hydrateAfterFinalize(batchId);
+  };
+
+  const runInternalThenFinalize = async (
+    activeCommitSessionId: number,
+    batchId: number,
+  ) => {
+    setCommitPipelineStep("INTERNAL_CHECK");
+    const internalReport = await apiRunInternalCommitCheck(activeCommitSessionId);
+
+    if (internalReport.conflictCount > 0) {
+      setCommitPipelineStep("INTERNAL_CONFLICTS");
+      setConflictStage("internal");
+      setConflictReport(internalReport);
+      setConflictResolutions({});
+      setShowConflictDialog(true);
+      return;
+    }
+
+    await runFreezeRuntimeAndFinalize(activeCommitSessionId, batchId);
+  };
+
+  const runFreezeRuntimeAndFinalizeForEdit = async (
+    activeCommitSessionId: number,
+    slotSystemId: number,
+  ) => {
+    setEditSessionStatus("COMMITTING");
+    setCommitPipelineStep("FREEZE");
+    await apiStartCommitFreeze(activeCommitSessionId);
+    setIsCommitFreezeActive(true);
+
+    setCommitPipelineStep("RUNTIME_CHECK");
+    const runtimeReport = await apiRunRuntimeCommitCheck(activeCommitSessionId);
+
+    if (runtimeReport.conflictCount > 0) {
+      setCommitPipelineStep("RUNTIME_CONFLICTS");
+      setConflictStage("runtime");
+      setConflictReport(runtimeReport);
+      setConflictResolutions({});
+      setShowConflictDialog(true);
+      return;
+    }
+
+    setCommitPipelineStep("FINALIZE");
+    const finalizeReport = await apiFinalizeCommitSession(activeCommitSessionId);
+    setCommitReport(null);
+    setCommitPipelineStep("COMPLETED");
+    clearCommitConflictState();
+    setEditStartResult(null);
+    setChangeSuccess(
+      `Edit commit completed. Created ${finalizeReport.createdBookings} bookings and removed ${finalizeReport.deletedConflictingBookings} obsolete booking(s).`,
+    );
+    setShowChangeWorkspace(false);
+
+    await loadGrid(slotSystemId);
+    await loadSlotSystems();
+    await loadImportBatches(slotSystemId);
+    setEditSessionStatus("VIEW");
+  };
+
+  const runInternalThenFinalizeForEdit = async (
+    activeCommitSessionId: number,
+    slotSystemId: number,
+  ) => {
+    setCommitPipelineStep("INTERNAL_CHECK");
+    const internalReport = await apiRunInternalCommitCheck(activeCommitSessionId);
+
+    if (internalReport.conflictCount > 0) {
+      setCommitPipelineStep("INTERNAL_CONFLICTS");
+      setConflictStage("internal");
+      setConflictReport(internalReport);
+      setConflictResolutions({});
+      setShowConflictDialog(true);
+      return;
+    }
+
+    await runFreezeRuntimeAndFinalizeForEdit(activeCommitSessionId, slotSystemId);
   };
 
   const handleCommitImport = async () => {
@@ -1826,40 +2097,574 @@ export function TimetableBuilderPage() {
     setCommitLoading(true);
     setImportError(null);
     setImportInfo(null);
+    setCommitPipelineStep("SESSION_STARTED");
+
+    let startedCommitSessionId: number | null = null;
 
     try {
       const decisions = buildImportDecisionsPayload();
+      const session = await apiStartCommitSession(previewReport.batchId, decisions);
+      startedCommitSessionId = session.commitSessionId;
 
-      const report = await apiCommitTimetableImport(previewReport.batchId, decisions);
-      setCommitReport(report);
-  showConflictingBookingsPopup(report, "Commit");
+      setCommitSessionId(session.commitSessionId);
+      setCommitFlowContext("import");
+      setCommitTargetSlotSystemId(previewReport.slotSystemId);
 
-      const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
-      hydratePreviewFromBatch(refreshedReport);
+      setCommitPipelineStep("EXTERNAL_CHECK");
+      const externalReport = await apiRunExternalCommitCheck(session.commitSessionId);
 
-      await loadGrid(refreshedReport.slotSystemId);
-      await loadProcessedRows(previewReport.batchId);
-      await loadImportBatches(refreshedReport.slotSystemId);
+      if (externalReport.conflictCount > 0) {
+        setCommitPipelineStep("EXTERNAL_CONFLICTS");
+        setConflictStage("external");
+        setConflictReport(externalReport);
+        setConflictResolutions({});
+        setShowConflictDialog(true);
+        return;
+      }
+
+      await runInternalThenFinalize(session.commitSessionId, previewReport.batchId);
     } catch (e) {
-      setImportError(e instanceof Error ? e.message : "Failed to commit import");
+      setCommitPipelineStep("FAILED");
+
+      const message = e instanceof Error ? e.message : "Failed to start staged commit";
+
+      if (isRateLimitError(e)) {
+        await cleanupAfterRateLimitedCommitFailure(startedCommitSessionId);
+        setImportError(
+          `${message} Commit session was reset to avoid a stuck running state. Retry once the cooldown ends.`,
+        );
+      } else {
+        setImportError(message);
+      }
     } finally {
       setCommitLoading(false);
     }
   };
 
+  const handleResolveConflicts = async () => {
+    if (!conflictReport || !conflictStage || !commitSessionId) {
+      return;
+    }
+
+    const unresolved = conflictReport.conflicts.filter(
+      (conflict) => !conflictResolutions[conflict.id],
+    );
+
+    if (unresolved.length > 0) {
+      setImportError(
+        `Please resolve all ${unresolved.length} conflict(s) before continuing`,
+      );
+      return;
+    }
+
+    const missingRoom = conflictReport.conflicts.filter((conflict) => {
+      const resolution = conflictResolutions[conflict.id];
+      if (!resolution) {
+        return true;
+      }
+
+      if (conflictStage === "runtime") {
+        return resolution.action === "ALTERNATIVE_ROOM" && !resolution.roomId;
+      }
+
+      if (resolution.action !== "CHANGE_ROOM") {
+        return false;
+      }
+
+      if (resolution.roomResolutionMode === "CREATE_ROOM") {
+        return false;
+      }
+
+      return !resolution.roomId;
+    });
+
+    if (missingRoom.length > 0) {
+      setImportError("Please select a room for all room-change resolutions");
+      return;
+    }
+
+    const missingCreateRoomInputs = conflictReport.conflicts.filter((conflict) => {
+      const resolution = conflictResolutions[conflict.id];
+      if (!resolution || conflictStage === "runtime") {
+        return false;
+      }
+
+      if (resolution.action !== "CHANGE_ROOM" || resolution.roomResolutionMode !== "CREATE_ROOM") {
+        return false;
+      }
+
+      const buildingId = Number(resolution.createRoomBuildingId);
+      const roomName = resolution.createRoomName?.trim() ?? "";
+
+      return !Number.isInteger(buildingId) || buildingId <= 0 || roomName.length === 0;
+    });
+
+    if (missingCreateRoomInputs.length > 0) {
+      setImportError("Please provide building and room name for all create-room resolutions");
+      return;
+    }
+
+    const missingSlotRange = conflictReport.conflicts.filter((conflict) => {
+      const resolution = conflictResolutions[conflict.id];
+      if (!resolution || conflictStage === "runtime") {
+        return false;
+      }
+
+      if (
+        resolution.action !== "CHANGE_SLOT_EXISTING" &&
+        resolution.action !== "CREATE_SLOT_AND_USE"
+      ) {
+        return false;
+      }
+
+      const nextStart = resolution.startAt ? new Date(resolution.startAt) : null;
+      const nextEnd = resolution.endAt ? new Date(resolution.endAt) : null;
+
+      if (!nextStart || !nextEnd) {
+        return true;
+      }
+
+      if (Number.isNaN(nextStart.getTime()) || Number.isNaN(nextEnd.getTime())) {
+        return true;
+      }
+
+      return nextStart >= nextEnd;
+    });
+
+    if (missingSlotRange.length > 0) {
+      setImportError("Please provide a valid start/end window for all slot-change resolutions");
+      return;
+    }
+
+    setConflictLoading(true);
+    setImportError(null);
+
+    try {
+      const resolutions: CommitSessionResolutionDecision[] = [];
+
+      for (const conflict of conflictReport.conflicts) {
+        const resolution = conflictResolutions[conflict.id]!;
+        let resolvedRoomId = resolution.roomId;
+
+        if (
+          conflictStage !== "runtime" &&
+          resolution.action === "CHANGE_ROOM" &&
+          resolution.roomResolutionMode === "CREATE_ROOM"
+        ) {
+          const buildingId = Number(resolution.createRoomBuildingId);
+          const roomName = resolution.createRoomName?.trim() ?? "";
+
+          const createdRoom = await apiCreateRoom({
+            buildingId,
+            name: roomName,
+          });
+
+          resolvedRoomId = createdRoom.id;
+
+          setRooms((prevRooms) => {
+            if (prevRooms.some((room) => room.id === createdRoom.id)) {
+              return prevRooms;
+            }
+
+            return [...prevRooms, createdRoom];
+          });
+        }
+
+        const nextResolution: CommitSessionResolutionDecision = {
+          conflictId: conflict.id,
+          action: resolution.action,
+          ...(resolution.target ? { target: resolution.target } : {}),
+          ...(resolvedRoomId ? { roomId: resolvedRoomId } : {}),
+        };
+
+        if (
+          (resolution.action === "CHANGE_SLOT_EXISTING" ||
+            resolution.action === "CREATE_SLOT_AND_USE") &&
+          resolution.startAt &&
+          resolution.endAt
+        ) {
+          nextResolution.startAt = new Date(resolution.startAt).toISOString();
+          nextResolution.endAt = new Date(resolution.endAt).toISOString();
+        }
+
+        resolutions.push(nextResolution);
+      }
+
+      if (conflictStage === "external") {
+        setCommitPipelineStep("EXTERNAL_RESOLVED");
+        await apiResolveExternalCommitConflicts(commitSessionId, resolutions);
+        setCommitPipelineStep("EXTERNAL_CHECK");
+        const externalReport = await apiRunExternalCommitCheck(commitSessionId);
+
+        if (externalReport.conflictCount > 0) {
+          setCommitPipelineStep("EXTERNAL_CONFLICTS");
+          setConflictReport(externalReport);
+          setConflictResolutions({});
+          return;
+        }
+
+        setShowConflictDialog(false);
+
+        if (commitFlowContext === "edit") {
+          if (!commitTargetSlotSystemId) {
+            throw new Error("Missing target slot system for edit commit");
+          }
+
+          await runInternalThenFinalizeForEdit(commitSessionId, commitTargetSlotSystemId);
+        } else {
+          if (!previewReport) {
+            throw new Error("Missing import context for staged commit");
+          }
+
+          await runInternalThenFinalize(commitSessionId, previewReport.batchId);
+        }
+
+        return;
+      }
+
+      if (conflictStage === "internal") {
+        setCommitPipelineStep("INTERNAL_RESOLVED");
+        await apiResolveInternalCommitConflicts(commitSessionId, resolutions);
+        setCommitPipelineStep("INTERNAL_CHECK");
+        const internalReport = await apiRunInternalCommitCheck(commitSessionId);
+
+        if (internalReport.conflictCount > 0) {
+          setCommitPipelineStep("INTERNAL_CONFLICTS");
+          setConflictReport(internalReport);
+          setConflictResolutions({});
+          return;
+        }
+
+        setShowConflictDialog(false);
+
+        if (commitFlowContext === "edit") {
+          if (!commitTargetSlotSystemId) {
+            throw new Error("Missing target slot system for edit commit");
+          }
+
+          await runFreezeRuntimeAndFinalizeForEdit(commitSessionId, commitTargetSlotSystemId);
+        } else {
+          if (!previewReport) {
+            throw new Error("Missing import context for staged commit");
+          }
+
+          await runFreezeRuntimeAndFinalize(commitSessionId, previewReport.batchId);
+        }
+
+        return;
+      }
+
+      setCommitPipelineStep("RUNTIME_RESOLVED");
+      await apiResolveRuntimeCommitConflicts(commitSessionId, resolutions);
+      setCommitPipelineStep("RUNTIME_CHECK");
+      const runtimeReport = await apiRunRuntimeCommitCheck(commitSessionId);
+
+      if (runtimeReport.conflictCount > 0) {
+        setCommitPipelineStep("RUNTIME_CONFLICTS");
+        setConflictReport(runtimeReport);
+        setConflictResolutions({});
+        return;
+      }
+
+      setCommitPipelineStep("FINALIZE");
+      const finalizeReport = await apiFinalizeCommitSession(commitSessionId);
+      setCommitReport(null);
+      setCommitPipelineStep("COMPLETED");
+      clearCommitConflictState();
+
+      if (commitFlowContext === "edit") {
+        const targetSlotSystemId = commitTargetSlotSystemId;
+
+        if (!targetSlotSystemId) {
+          throw new Error("Missing target slot system for edit commit");
+        }
+
+        setEditStartResult(null);
+        setChangeSuccess(
+          `Edit commit completed. Created ${finalizeReport.createdBookings} bookings and removed ${finalizeReport.deletedConflictingBookings} obsolete booking(s).`,
+        );
+        setShowChangeWorkspace(false);
+
+        await loadGrid(targetSlotSystemId);
+        await loadSlotSystems();
+        await loadImportBatches(targetSlotSystemId);
+      } else {
+        if (!previewReport) {
+          throw new Error("Missing import context for staged commit");
+        }
+
+        setImportInfo(
+          `Commit completed. Created ${finalizeReport.createdBookings} bookings and skipped ${finalizeReport.skippedOperations} operation(s).`,
+        );
+        await hydrateAfterFinalize(previewReport.batchId);
+      }
+    } catch (e) {
+      setCommitPipelineStep("FAILED");
+
+      const message = e instanceof Error ? e.message : "Failed to resolve staged conflicts";
+
+      if (isRateLimitError(e)) {
+        await cleanupAfterRateLimitedCommitFailure(commitSessionId);
+        setImportError(
+          `${message} Commit session was reset to avoid a stuck running state. Retry once the cooldown ends.`,
+        );
+      } else {
+        setImportError(message);
+      }
+    } finally {
+      setConflictLoading(false);
+    }
+  };
+
+  const handleCancelCommit = async () => {
+    if (!commitSessionId) {
+      clearCommitConflictState();
+      return;
+    }
+
+    try {
+      await apiCancelCommitSession(commitSessionId);
+      const cancelledEditFlow = commitFlowContext === "edit";
+      setCommitPipelineStep("CANCELLED");
+      clearCommitConflictState();
+
+      if (cancelledEditFlow) {
+        setChangeSuccess("Edit commit session cancelled. Booking operations resumed.");
+      } else {
+        setImportInfo("Commit session cancelled. Booking operations resumed.");
+      }
+    } catch (e) {
+      setCommitPipelineStep("FAILED");
+      setImportError(e instanceof Error ? e.message : "Failed to cancel commit session");
+    }
+  };
+
+  // Change workspace handlers
+  const handlePreviewChanges = useCallback(async () => {
+    if (selectedSystemId === "") return;
+
+    setChangeLoading(true);
+    setChangeError(null);
+    setEditStartResult(null);
+    setCommitPipelineStep("IDLE");
+
+    try {
+      const preview = await apiPreviewSlotSystemChanges(Number(selectedSystemId), {});
+      setChangePreview(preview);
+      if (grid && grid.slotSystem.id === Number(selectedSystemId)) {
+        setEditDraftJson(JSON.stringify(toSnapshotStateFromGrid(grid), null, 2));
+      } else {
+        setEditDraftJson("");
+      }
+      setShowChangeWorkspace(true);
+    } catch (e) {
+      setChangeError(e instanceof Error ? e.message : "Failed to preview changes");
+    } finally {
+      setChangeLoading(false);
+    }
+  }, [grid, selectedSystemId]);
+
+  useEffect(() => {
+    if (view !== "workspace") {
+      setWorkspaceAutoOpenedForSystemId(null);
+      return;
+    }
+
+    if (selectedSystemId === "" || !selectedSystem?.isLocked) {
+      return;
+    }
+
+    if (workspaceAutoOpenedForSystemId === selectedSystemId) {
+      return;
+    }
+
+    if (changeLoading || showChangeWorkspace) {
+      return;
+    }
+
+    setWorkspaceAutoOpenedForSystemId(selectedSystemId);
+    void handlePreviewChanges();
+  }, [
+    view,
+    selectedSystemId,
+    selectedSystem?.isLocked,
+    workspaceAutoOpenedForSystemId,
+    changeLoading,
+    showChangeWorkspace,
+    handlePreviewChanges,
+  ]);
+
+  const handleStartEditCommit = async () => {
+    if (selectedSystemId === "" || !grid || !selectedSystem) {
+      setChangeError("Select a locked slot system with loaded grid before starting edit mode");
+      return;
+    }
+
+    if (!selectedSystem.isLocked) {
+      setChangeError("Edit mode is only available for locked slot systems");
+      return;
+    }
+
+    setEditStartLoading(true);
+    setChangeError(null);
+    setChangeSuccess(null);
+    setEditSessionStatus("EDITING");
+    setImportError(null);
+    setCommitPipelineStep("SESSION_STARTED");
+
+    let startedCommitSessionId: number | null = null;
+
+    try {
+      let snapshot = toSnapshotStateFromGrid(grid);
+
+      if (editDraftJson.trim().length > 0) {
+        try {
+          const parsed = JSON.parse(editDraftJson) as TimetableSnapshotState;
+          snapshot = parsed;
+        } catch {
+          setChangeError("Edit draft JSON is invalid. Fix the JSON before starting commit.");
+          setEditSessionStatus("VIEW");
+          return;
+        }
+      }
+
+      const result = await apiStartEditCommitSession({
+        slotSystemId: selectedSystemId,
+        expectedVersion: selectedSystem.version,
+        newState: snapshot,
+        pruneBookings: editPruneBookings,
+      });
+
+      if (result.noChanges === true || result.diff.affectedRows === 0) {
+        setEditStartResult(result);
+        setChangeError(result.message ?? "No changes detected");
+        setCommitPipelineStep("IDLE");
+        setEditSessionStatus("VIEW");
+        return;
+      }
+
+      if (!result.session) {
+        setChangeError("Edit session could not be started");
+        setCommitPipelineStep("FAILED");
+        setEditSessionStatus("VIEW");
+        return;
+      }
+
+      setEditStartResult(result);
+      startedCommitSessionId = result.session.commitSessionId;
+      setCommitSessionId(result.session.commitSessionId);
+      setCommitFlowContext("edit");
+      setCommitTargetSlotSystemId(selectedSystemId);
+
+      // Check if pruning is enabled and there are bookings to prune
+      if (shouldShowPruneConfirmation({ pruneEnabled: editPruneBookings, result })) {
+        setPendingPruneBookingCount(result.diff.bookingImpact.totalAffectedBookings);
+        setShowPruneConfirmation(true);
+        setEditSessionStatus("VIEW");
+        return;
+      }
+
+      setCommitPipelineStep("EXTERNAL_CHECK");
+      const externalReport = await apiRunExternalCommitCheck(result.session.commitSessionId);
+
+      if (externalReport.conflictCount > 0) {
+        setCommitPipelineStep("EXTERNAL_CONFLICTS");
+        setConflictStage("external");
+        setConflictReport(externalReport);
+        setConflictResolutions({});
+        setShowConflictDialog(true);
+        return;
+      }
+
+      await runInternalThenFinalizeForEdit(result.session.commitSessionId, selectedSystemId);
+    } catch (e) {
+      setCommitPipelineStep("FAILED");
+      const errorMsg = e instanceof Error ? e.message : "Failed to start edit commit";
+
+      if (isRateLimitError(e)) {
+        await cleanupAfterRateLimitedCommitFailure(startedCommitSessionId);
+        setChangeError(
+          `${mapEditStartErrorToMessage(errorMsg)} Commit session was reset to avoid a stuck running state. Retry once the cooldown ends.`,
+        );
+      } else {
+        setChangeError(mapEditStartErrorToMessage(errorMsg));
+      }
+    } finally {
+      setEditStartLoading(false);
+      setEditSessionStatus("VIEW");
+    }
+  };
+
+  const handleConfirmPrune = async () => {
+    if (!editStartResult?.session) {
+      setChangeError("No edit session found");
+      return;
+    }
+
+    if (selectedSystemId === "") {
+      setChangeError("Slot system is not selected");
+      return;
+    }
+
+    setShowPruneConfirmation(false);
+    setEditSessionStatus("EDITING");
+
+    const activeCommitSessionId = editStartResult.session.commitSessionId;
+
+    try {
+      setCommitPipelineStep("EXTERNAL_CHECK");
+      const externalReport = await apiRunExternalCommitCheck(activeCommitSessionId);
+
+      if (externalReport.conflictCount > 0) {
+        setCommitPipelineStep("EXTERNAL_CONFLICTS");
+        setConflictStage("external");
+        setConflictReport(externalReport);
+        setConflictResolutions({});
+        setShowConflictDialog(true);
+        setEditSessionStatus("VIEW");
+        return;
+      }
+
+      await runInternalThenFinalizeForEdit(activeCommitSessionId, selectedSystemId);
+    } catch (e) {
+      setCommitPipelineStep("FAILED");
+
+      const message = e instanceof Error ? e.message : "Failed to proceed with prune confirmation";
+
+      if (isRateLimitError(e)) {
+        await cleanupAfterRateLimitedCommitFailure(activeCommitSessionId);
+        setChangeError(
+          `${message} Commit session was reset to avoid a stuck running state. Retry once the cooldown ends.`,
+        );
+      } else {
+        setChangeError(message);
+      }
+    } finally {
+      setEditSessionStatus("VIEW");
+    }
+  };
+
   return (
-    <section className="timetable-builder-page">
-      <div className="page-header">
-        <h2>Timetable Builder</h2>
-        <p>Build slot systems with day columns, time-band rows, and merged slot blocks</p>
+    <section className="min-h-screen bg-gray-50">
+      <div className="mb-8 px-6 py-8">
+        <h2 className="text-3xl font-bold mb-2">Timetable Builder</h2>
+        <p className="text-gray-600">Build slot systems with day columns, time-band rows, and merged slot blocks</p>
       </div>
 
-      <form className="card section-gap timetable-slot-system-card" onSubmit={handleCreateSlotSystem}>
+      <div className="flex flex-col">
+
+      {showStructureSection && (
+      <form
+        id="timetable-structure-section"
+        className="border rounded-lg p-6 mb-8 mx-4 bg-white"
+        style={{ order: 1 }}
+        onSubmit={handleCreateSlotSystem}
+      >
         <div className="card-header">
-          <h3>Slot System Selector</h3>
+          <h3>Slot System Setup</h3>
         </div>
 
-        <div className="form-row">
+        <div className="form-row lg:grid-cols-2">
           <div className="form-field">
             <label htmlFor="slotSystemSelect">Active slot system</label>
             <select
@@ -1875,37 +2680,35 @@ export function TimetableBuilderPage() {
               <option value="">Select a slot system</option>
               {slotSystems.map((system) => (
                 <option key={system.id} value={system.id}>
-                  {system.name}
+                  {system.isLocked ? "🔒 " : ""}{system.name}
                 </option>
               ))}
             </select>
           </div>
           <div className="form-field">
             <label htmlFor="newSlotSystemName">Create slot system</label>
-            <input
-              id="newSlotSystemName"
-              className="input"
-              type="text"
-              value={newSystemName}
-              onChange={(e) => setNewSystemName(e.target.value)}
-              placeholder="e.g. UG Semester Grid"
-              disabled={actionLoading}
-            />
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                id="newSlotSystemName"
+                className="input flex-1 min-w-0"
+                type="text"
+                value={newSystemName}
+                onChange={(e) => setNewSystemName(e.target.value)}
+                placeholder="e.g. UG Semester Grid"
+                disabled={actionLoading}
+              />
+              <button
+                type="submit"
+                className="btn btn-primary whitespace-nowrap shrink-0"
+                disabled={actionLoading}
+              >
+                {actionLoading ? "Saving..." : "Create"}
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="btn-group">
-          <button type="submit" className="btn btn-primary" disabled={actionLoading}>
-            {actionLoading ? "Saving..." : "Create Slot System"}
-          </button>
-          <button
-            type="button"
-            className="btn btn-danger"
-            onClick={() => void handleDeleteSlotSystem()}
-            disabled={actionLoading || selectedSystemId === ""}
-          >
-            Delete Slot System
-          </button>
+        <div className="btn-group mt-4">
           <button
             type="button"
             className="btn btn-ghost"
@@ -1914,67 +2717,161 @@ export function TimetableBuilderPage() {
           >
             {loadingSystems ? "Refreshing..." : "Refresh"}
           </button>
+          {isSystemLocked && (
+            <button
+              id="timetable-open-change-workspace"
+              type="button"
+              className="btn"
+              style={{ backgroundColor: "#7c3aed", color: "white" }}
+              onClick={() => void handlePreviewChanges()}
+              disabled={changeLoading || actionLoading}
+            >
+              {changeLoading ? "Loading..." : "✏️ Edit Structure"}
+            </button>
+          )}
         </div>
 
-        <div className="form-row" style={{ marginTop: "var(--space-4)" }}>
-          <div className="form-field">
-            <label>Booking prune options</label>
-            <div className="btn-group">
-              <button
-                type="button"
-                className="btn btn-warning"
-                onClick={() => void handlePruneSelectedSlotSystemBookings()}
-                disabled={actionLoading || selectedSystemId === ""}
-              >
-                Prune Selected Slot System Bookings
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger"
-                onClick={() => void handlePruneAllBookings()}
-                disabled={actionLoading}
-              >
-                Prune All Bookings
-              </button>
-            </div>
+     {/* Prune Confirmation Modal */}
+     {showPruneConfirmation && (
+       <div
+         className="fixed inset-0 z-[60] flex items-center justify-center"
+         style={{ backgroundColor: "rgba(0,0,0,0.6)" }}
+       >
+         <div
+           className="bg-white rounded-lg shadow-2xl p-6 w-full max-w-md"
+         >
+           <h3 className="text-lg font-bold mb-4 text-red-600">⚠️ Confirm Pruning</h3>
+           <p className="text-gray-700 mb-2">
+             You have enabled booking pruning. This will remove <strong>{pendingPruneBookingCount}</strong> existing booking{pendingPruneBookingCount !== 1 ? "s" : ""} that no longer fit the new slot structure.
+           </p>
+           <p className="text-gray-600 text-sm mb-4">
+             This action cannot be undone. Pruned bookings will be permanently deleted.
+           </p>
+           <div className="flex gap-3 justify-end">
+             <button
+               className="btn btn-ghost"
+               onClick={() => {
+                 setShowPruneConfirmation(false);
+                 setPendingPruneBookingCount(0);
+               }}
+             >
+               Cancel (Keep Bookings)
+             </button>
+             <button
+               className="btn btn-error"
+               onClick={() => void handleConfirmPrune()}
+             >
+               Confirm Prune
+             </button>
+           </div>
+         </div>
+       </div>
+     )}
+        {isSystemLocked && (
+          <div className="mt-3 p-3 rounded" style={{ backgroundColor: "#fef3cd", border: "1px solid #ffc107" }}>
+            <strong>🔒 Locked System:</strong> This slot system has been committed and is locked.
+            Direct day/band/block edits are disabled. Use <strong>"Edit Structure"</strong> to make changes through the change workspace.
           </div>
-        </div>
-
-        {successMessage && <div className="alert alert-success mt-4">{successMessage}</div>}
+        )}
       </form>
+      )}
 
-      <form className="card section-gap timetable-import-card" onSubmit={handlePreviewImport}>
+      {showImportSection && (
+      <form
+        id="timetable-import-section"
+        className="border rounded-lg p-6 mb-8 mx-4 bg-white"
+        style={{ order: 4 }}
+        onSubmit={handlePreviewImport}
+      >
         <div className="card-header">
           <h3>Classroom Allocation Import</h3>
           {previewReport && (
             <span className="badge badge-role">
-              Batch #{previewReport.batchId} · {previewReport.status}
+              {previewReport.status}
             </span>
           )}
         </div>
 
+        {!showStructureSection && (
+          <div className="form-row">
+            <div className="form-field">
+              <label htmlFor="slotSystemSelectImport">Slot system</label>
+              <select
+                id="slotSystemSelectImport"
+                className="input"
+                value={selectedSystemId}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setSelectedSystemId(value === "" ? "" : Number(value));
+                }}
+                disabled={loadingSystems || actionLoading || importLoading}
+              >
+                <option value="">Select a slot system</option>
+                {slotSystems.map((system) => (
+                  <option key={system.id} value={system.id}>
+                    {system.isLocked ? "🔒 " : ""}
+                    {system.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+
+        <div className="alert mb-4">
+          Single-sheet mode is active: each slot system uses one classroom allocation sheet.
+          Uploading a new file replaces older batch context for the selected slot system.
+          {selectedSystemId !== "" && (
+            <div className="mt-1 text-xs text-muted-foreground">
+              {importBatchesLoading
+                ? "Checking active sheet context..."
+                : `Known sheets for selected slot system: ${importBatches.length}${
+                    selectedBatchId !== "" ? ` · Active batch id: ${selectedBatchId}` : ""
+                  }`}
+            </div>
+          )}
+          {previewReport && (
+            <div className="mt-1 text-xs text-muted-foreground">
+              Active sheet: Batch #{previewReport.batchId} · {formatDateDDMMYYYY(previewReport.termStartDate)} to {formatDateDDMMYYYY(previewReport.termEndDate)}
+            </div>
+          )}
+        </div>
+
+        {commitPipelineStep !== "IDLE" && (
+          <div className="alert mb-4">
+            Commit Pipeline: <strong>{toCommitPipelineLabel(commitPipelineStep)}</strong>
+            {(commitPipelineStep === "COMPLETED" ||
+              commitPipelineStep === "FAILED" ||
+              commitPipelineStep === "CANCELLED") && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                style={{ marginLeft: "var(--space-2)" }}
+                onClick={() => setCommitPipelineStep("IDLE")}
+              >
+                Clear Status
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="form-row">
           <div className="form-field">
-            <label htmlFor="importBatchSelect">Open existing batch</label>
+            <label htmlFor="batchSelect">Load existing batch</label>
             <select
-              id="importBatchSelect"
+              id="batchSelect"
               className="input"
               value={selectedBatchId}
-              onChange={(e) =>
-                setSelectedBatchId(e.target.value === "" ? "" : Number(e.target.value))
-              }
-              disabled={
-                selectedSystemId === "" ||
-                importLoading ||
-                commitLoading ||
-                saveDecisionsLoading ||
-                importBatchesLoading
-              }
+              onChange={(e) => {
+                const value = e.target.value;
+                setSelectedBatchId(value === "" ? "" : Number(value));
+              }}
+              disabled={importBatchesLoading || importLoading}
             >
-              <option value="">Select a batch</option>
+              <option value="">Select batch</option>
               {importBatches.map((batch) => (
                 <option key={batch.batchId} value={batch.batchId}>
-                  #{batch.batchId} · {batch.status} · Valid {batch.validRows} · Resolved {batch.resolvedRows} · Unresolved {batch.unresolvedRows} · {formatDateDDMMYYYY(batch.termStartDate)} to {formatDateDDMMYYYY(batch.termEndDate)} · {batch.fileName}
+                  #{batch.batchId} · {batch.status}
                 </option>
               ))}
             </select>
@@ -1984,58 +2881,42 @@ export function TimetableBuilderPage() {
             <div className="btn-group">
               <button
                 type="button"
-                className="btn btn-primary"
-                onClick={() => void handleLoadSelectedBatch()}
-                disabled={
-                  selectedBatchId === "" ||
-                  importLoading ||
-                  commitLoading ||
-                  saveDecisionsLoading ||
-                  reallocateLoading ||
-                  deleteBatchLoading
-                }
+                className="btn btn-ghost"
+                onClick={() => {
+                  if (selectedBatchId !== "") {
+                    void handleLoadImportBatch(selectedBatchId);
+                  }
+                }}
+                disabled={selectedBatchId === "" || importLoading}
               >
                 {importLoading ? "Loading..." : "Load Selected Batch"}
               </button>
-              <button
-                type="button"
-                className="btn btn-danger"
-                onClick={() => void handleDeleteSelectedBatch()}
-                disabled={
-                  (selectedBatchId === "" && !previewReport) ||
-                  importLoading ||
-                  commitLoading ||
-                  saveDecisionsLoading ||
-                  reallocateLoading ||
-                  deleteBatchLoading
-                }
-              >
-                {deleteBatchLoading ? "Deleting..." : "Delete Batch"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => void handleRefreshBatchContext()}
-                disabled={
-                  selectedSystemId === "" ||
-                  importLoading ||
-                  commitLoading ||
-                  saveDecisionsLoading ||
-                  reallocateLoading ||
-                  deleteBatchLoading ||
-                  importBatchesLoading
-                }
-              >
-                {importBatchesLoading ? "Refreshing..." : "Refresh Batch + List"}
-              </button>
+              {selectedSystemId !== "" && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => void loadImportBatches(selectedSystemId)}
+                  disabled={importBatchesLoading || importLoading}
+                >
+                  {importBatchesLoading ? "Refreshing..." : "Refresh Batches"}
+                </button>
+              )}
             </div>
           </div>
         </div>
+
+        {!importBatchesLoading && importBatches.length === 0 && (
+          <div className="empty-text mt-2">No imported batches found for the selected slot system yet.</div>
+        )}
 
         {importBatchesError && (
           <div className="alert alert-error mt-4">{importBatchesError}</div>
         )}
 
+        {importError && <div className="alert alert-error mt-4">{importError}</div>}
+
+        {showImportControls && (
+        <>
         <div className="form-row">
           <div className="form-field">
             <label htmlFor="importTermStart">Term start date</label>
@@ -2173,25 +3054,24 @@ export function TimetableBuilderPage() {
         </div>
 
         {importInfo && <div className="alert alert-success mt-4">{importInfo}</div>}
-        {importError && <div className="alert alert-error mt-4">{importError}</div>}
 
         {previewReport && (
           <div className="mt-4">
-            <div className="alert alert-success" style={{ marginBottom: "var(--space-3)" }}>
+            <div className="alert alert-success mb-4">
               Processed {previewReport.processedRows} rows · Valid {previewReport.validRows} · Unresolved {previewReport.unresolvedRows}
-              <div style={{ marginTop: "var(--space-1)", fontSize: "0.8rem", color: "var(--gray-600)" }}>
+              <div className="mt-1 text-xs text-muted-foreground">
                 Term: {formatDateDDMMYYYY(previewReport.termStartDate)} - {formatDateDDMMYYYY(previewReport.termEndDate)}
               </div>
             </div>
 
             {previewReport.warnings.length > 0 && (
-              <div className="alert" style={{ marginBottom: "var(--space-3)" }}>
+              <div className="alert mb-4">
                 {previewReport.warnings.join(" | ")}
               </div>
             )}
 
             {isImportBatchCommitted && (
-              <div className="alert" style={{ marginBottom: "var(--space-3)" }}>
+              <div className="alert mb-4">
                 This batch is committed. You can adjust decisions, save, and run reallocation to regenerate its imported bookings.
               </div>
             )}
@@ -2200,10 +3080,6 @@ export function TimetableBuilderPage() {
               {previewReport.rows.map((row) => {
                 const decision = rowDecisions[row.rowId] ?? createDecisionForPreviewRow(row);
                 const isAutoAllowed = row.classification === "VALID_AND_AUTOMATABLE";
-                const moveTargetSlotSystems = slotSystems.filter(
-                  (system) => system.id !== previewReport.slotSystemId,
-                );
-                const selectedMoveTargetSlotSystemId = rowMoveTargetById[row.rowId] ?? "";
 
                 const selectedStartBandIndex =
                   decision.createSlotStartBandId === ""
@@ -2231,19 +3107,30 @@ export function TimetableBuilderPage() {
                         Slot: {row.slot || "-"} · Classroom: {row.classroom || "-"}
                       </div>
 
+                      {row.auxiliaryData && Object.keys(row.auxiliaryData).length > 0 && (
+                        <div className="data-item-subtitle mt-1">
+                          {Object.entries(row.auxiliaryData).map(([key, value], idx) => (
+                            <span key={key}>
+                              {idx > 0 && " · "}
+                              {key}: {value}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
                       {row.reasons.length > 0 && (
-                        <div className="empty-text" style={{ marginTop: "var(--space-2)" }}>
+                        <div className="empty-text mt-2">
                           Reason: {row.reasons.join(" | ")}
                         </div>
                       )}
 
                       {row.suggestions.length > 0 && (
-                        <div className="loading-text" style={{ marginTop: "var(--space-1)" }}>
+                        <div className="loading-text mt-1">
                           Suggestions: {row.suggestions.join(", ")}
                         </div>
                       )}
 
-                      <div className="form-row" style={{ marginTop: "var(--space-3)" }}>
+                      <div className="form-row mt-4">
                         <div className="form-field">
                           <label>Action</label>
                           <select
@@ -2264,59 +3151,16 @@ export function TimetableBuilderPage() {
                             <option value="RESOLVE">Resolve</option>
                           </select>
                           {decision.action === "IGNORE" && (
-                            <div className="data-item-subtitle" style={{ marginTop: "var(--space-1)" }}>
+                            <div className="data-item-subtitle mt-1">
                               Ignore: this row is not relevant for room allocation.
                             </div>
                           )}
                           {decision.action === "SKIP" && (
-                            <div className="data-item-subtitle" style={{ marginTop: "var(--space-1)" }}>
+                            <div className="data-item-subtitle mt-1">
                               Skip: keep this row for later resolution.
                             </div>
                           )}
                         </div>
-
-                        <>
-                          <div className="form-field">
-                            <label>Transfer To Slot System</label>
-                            <select
-                              className="input"
-                              value={selectedMoveTargetSlotSystemId}
-                              onChange={(e) =>
-                                updateRowMoveTarget(
-                                  row.rowId,
-                                  e.target.value === "" ? "" : Number(e.target.value),
-                                )
-                              }
-                              disabled={isDecisionEditingLocked || moveTargetSlotSystems.length === 0}
-                            >
-                              <option value="">
-                                {moveTargetSlotSystems.length > 0
-                                  ? "Select slot system"
-                                  : "No other slot systems"}
-                              </option>
-                              {moveTargetSlotSystems.map((system) => (
-                                <option key={system.id} value={system.id}>
-                                  {system.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="form-field">
-                            <label>Transfer</label>
-                            <button
-                              type="button"
-                              className="btn btn-ghost btn-sm"
-                              onClick={() => void handleMoveRowToAnotherSlotSystem(row)}
-                              disabled={
-                                isDecisionEditingLocked ||
-                                moveTargetSlotSystems.length === 0 ||
-                                selectedMoveTargetSlotSystemId === ""
-                              }
-                            >
-                              {movingRowId === row.rowId ? "Transferring..." : "Transfer Row"}
-                            </button>
-                          </div>
-                        </>
 
                         {decision.action === "RESOLVE" && (
                           <>
@@ -2503,7 +3347,7 @@ export function TimetableBuilderPage() {
                                     <option value="">Select room</option>
                                     {rooms.map((room) => (
                                       <option key={room.id} value={room.id}>
-                                        {roomLabelById.get(room.id) ?? `Room #${room.id}`}
+                                        {roomLabelById.get(room.id) ?? "Unknown Room"}
                                       </option>
                                     ))}
                                   </select>
@@ -2560,12 +3404,12 @@ export function TimetableBuilderPage() {
             </div>
 
             {commitReport.bookingConflictOccurrences > 0 && (
-              <div className="alert" style={{ marginTop: "var(--space-2)" }}>
+              <div className="alert mt-2">
                 Current bookings blocked {commitReport.bookingConflictOccurrences} occurrence(s) across {commitReport.bookingConflictRows} row(s).
               </div>
             )}
 
-            <div className="data-list" style={{ marginTop: "var(--space-3)" }}>
+            <div className="data-list mt-4">
               {commitReport.rowResults.map((row) => (
                 <div className="data-item" key={row.rowId}>
                   <div className="data-item-content">
@@ -2577,7 +3421,7 @@ export function TimetableBuilderPage() {
                     </div>
 
                     {row.bookingConflictReasons.length > 0 && (
-                      <div className="alert" style={{ marginTop: "var(--space-2)" }}>
+                      <div className="alert mt-2">
                         Booking conflicts: {row.bookingConflictReasons.join(" | ")}
                       </div>
                     )}
@@ -2587,14 +3431,16 @@ export function TimetableBuilderPage() {
             </div>
           </div>
         )}
+        </>
+        )}
 
-        {(processedRowsLoading || processedRowsError || processedRowsReport) && (
-          <div className="mt-4">
-            <div className="card-header" style={{ marginBottom: "var(--space-2)" }}>
+        {showProcessedSection && (processedRowsLoading || processedRowsError || processedRowsReport) && (
+          <div id="timetable-processed-section" className="mt-4">
+            <div className="card-header mb-2">
               <h3>Processed Rows And Booking CRUD</h3>
               {processedRowsReport && (
                 <span className="badge badge-role">
-                  Batch #{processedRowsReport.batchId} · {processedRowsReport.status}
+                  {processedRowsReport.status}
                 </span>
               )}
             </div>
@@ -2604,13 +3450,13 @@ export function TimetableBuilderPage() {
             )}
 
             {processedRowsError && (
-              <div className="alert alert-error" style={{ marginBottom: "var(--space-3)" }}>
+              <div className="alert alert-error mb-4">
                 {processedRowsError}
               </div>
             )}
 
             {processedRowsReport && processedRowsReport.warnings.length > 0 && (
-              <div className="alert" style={{ marginBottom: "var(--space-3)" }}>
+              <div className="alert mb-4">
                 {processedRowsReport.warnings.join(" | ")}
               </div>
             )}
@@ -2627,6 +3473,10 @@ export function TimetableBuilderPage() {
                     startAt: "",
                     endAt: "",
                   };
+                  const resolvedRoomLabel =
+                    row.resolvedRoomId === null
+                      ? "-"
+                      : (roomLabelById.get(row.resolvedRoomId) ?? "Assigned room");
 
                   return (
                     <div className="data-item" key={`processed-row-${row.rowId}`}>
@@ -2638,26 +3488,26 @@ export function TimetableBuilderPage() {
                           </span>
                         </div>
                         <div className="data-item-subtitle">
-                          Resolved Slot: {row.resolvedSlotLabel || "-"} · Resolved Room: {row.resolvedRoomId ?? "-"}
+                          Resolved Slot: {row.resolvedSlotLabel || "-"} · Resolved Room: {resolvedRoomLabel}
                         </div>
-                        <div className="empty-text" style={{ marginTop: "var(--space-1)" }}>
+                        <div className="empty-text mt-1">
                           Created {row.created} · Already Processed {row.alreadyProcessed} · Failed {row.failed} · Skipped {row.skipped}
                         </div>
 
                         {row.reasons.length > 0 && (
-                          <div className="loading-text" style={{ marginTop: "var(--space-1)" }}>
+                          <div className="loading-text mt-1">
                             Reasons: {row.reasons.join(" | ")}
                           </div>
                         )}
 
                         {row.bookingConflictReasons.length > 0 && (
-                          <div className="alert" style={{ marginTop: "var(--space-2)" }}>
+                          <div className="alert mt-2">
                             Booking conflicts with current schedule: {row.bookingConflictReasons.join(" | ")}
                           </div>
                         )}
 
                         {row.occurrences.length === 0 && (
-                          <p className="empty-text" style={{ marginTop: "var(--space-2)" }}>
+                          <p className="empty-text mt-2">
                             No occurrences generated for this row.
                           </p>
                         )}
@@ -2674,30 +3524,29 @@ export function TimetableBuilderPage() {
                           return (
                             <div
                               key={`occurrence-${occurrence.occurrenceId}`}
-                              className="card"
-                              style={{ marginTop: "var(--space-3)" }}
+                              className="card mt-4"
                             >
                               <div className="data-item-title">
-                                Occurrence #{occurrence.occurrenceId} · {occurrence.status}
+                                {occurrence.status}
                               </div>
                               <div className="data-item-subtitle">
-                                {formatDateDDMMYYYY(occurrence.startAt)} to {formatDateDDMMYYYY(occurrence.endAt)} · Room #{occurrence.roomId}
+                                {formatDateDDMMYYYY(occurrence.startAt)} to {formatDateDDMMYYYY(occurrence.endAt)}
                               </div>
 
                               {occurrence.errorMessage && (
-                                <div className="alert alert-error" style={{ marginTop: "var(--space-2)" }}>
+                                <div className="alert alert-error mt-2">
                                   {occurrence.errorMessage}
                                 </div>
                               )}
 
                               {isAdmin && occurrence.booking && (
-                                <div className="empty-text" style={{ marginTop: "var(--space-2)" }}>
-                                  Source: {occurrence.booking.source.replace(/_/g, " ")} · Source Ref: {occurrence.booking.sourceRef ?? "-"} · Request Link: {occurrence.booking.requestId ?? "-"} · Approved By: {occurrence.booking.approvedBy ?? "-"} · Approved At: {occurrence.booking.approvedAt ?? "-"}
+                                <div className="empty-text mt-2">
+                                  Source: {occurrence.booking.source.replace(/_/g, " ")} · Linked Request: {occurrence.booking.requestId ? "Yes" : "No"}
                                 </div>
                               )}
 
                               {occurrence.booking && bookingEdit ? (
-                                <div className="form-row" style={{ marginTop: "var(--space-3)" }}>
+                                <div className="form-row mt-4">
                                   <div className="form-field">
                                     <label>Booking Room</label>
                                     <select
@@ -2714,7 +3563,7 @@ export function TimetableBuilderPage() {
                                       <option value="">Select room</option>
                                       {rooms.map((roomOption) => (
                                         <option key={roomOption.id} value={roomOption.id}>
-                                          {roomLabelById.get(roomOption.id) ?? `Room #${roomOption.id}`}
+                                          {roomLabelById.get(roomOption.id) ?? "Unknown Room"}
                                         </option>
                                       ))}
                                     </select>
@@ -2785,7 +3634,7 @@ export function TimetableBuilderPage() {
                                   </div>
                                 </div>
                               ) : (
-                                <p className="empty-text" style={{ marginTop: "var(--space-2)" }}>
+                                <p className="empty-text mt-2">
                                   No linked booking for this occurrence.
                                 </p>
                               )}
@@ -2793,7 +3642,7 @@ export function TimetableBuilderPage() {
                           );
                         })}
 
-                        <div className="form-row" style={{ marginTop: "var(--space-3)" }}>
+                        <div className="form-row mt-4">
                           <div className="form-field">
                             <label>Create Booking Room</label>
                             <select
@@ -2809,7 +3658,7 @@ export function TimetableBuilderPage() {
                               <option value="">Select room</option>
                               {rooms.map((roomOption) => (
                                 <option key={roomOption.id} value={roomOption.id}>
-                                  {roomLabelById.get(roomOption.id) ?? `Room #${roomOption.id}`}
+                                  {roomLabelById.get(roomOption.id) ?? "Unknown Room"}
                                 </option>
                               ))}
                             </select>
@@ -2866,8 +3715,14 @@ export function TimetableBuilderPage() {
           </div>
         )}
       </form>
+      )}
 
-      <div className="card section-gap timetable-grid-card">
+      {showGridSection && (
+      <div
+        id="timetable-grid-section"
+        className="border rounded-lg p-6 mb-8 mx-4 bg-white"
+        style={{ order: 2 }}
+      >
         <div className="card-header">
           <h3>Grid Editor</h3>
           <span className="badge badge-role">
@@ -2877,7 +3732,7 @@ export function TimetableBuilderPage() {
 
         {selectedSystemId !== "" && (
           <>
-            <form className="form-row timetable-inline-form" onSubmit={handleCreateDay}>
+            <form className="flex gap-4 mb-6 items-end" onSubmit={handleCreateDay}>
               <div className="form-field">
                 <label htmlFor="newDayOfWeek">Add day</label>
                 <select
@@ -2885,7 +3740,7 @@ export function TimetableBuilderPage() {
                   className="input"
                   value={newDayOfWeek}
                   onChange={(e) => setNewDayOfWeek(e.target.value as DayOfWeek)}
-                  disabled={actionLoading}
+                  disabled={actionLoading || isSystemLocked}
                 >
                   {DAY_OF_WEEK_OPTIONS.map((dayOfWeek) => (
                     <option key={dayOfWeek} value={dayOfWeek}>
@@ -2894,15 +3749,20 @@ export function TimetableBuilderPage() {
                   ))}
                 </select>
               </div>
-              <div className="form-field timetable-inline-action">
+              <div className="flex-shrink-0">
                 <label className="sr-only" htmlFor="addDayButton">Add day</label>
-                <button id="addDayButton" type="submit" className="btn btn-primary" disabled={actionLoading}>
+                <button
+                  id="addDayButton"
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={actionLoading || isSystemLocked}
+                >
                   Add Day
                 </button>
               </div>
             </form>
 
-            <form className="form-row timetable-inline-form" onSubmit={handleCreateTimeBand}>
+            <form className="flex gap-4 mb-6 items-end" onSubmit={handleCreateTimeBand}>
               <div className="form-field">
                 <label htmlFor="newBandStart">Band start</label>
                 <DateInput
@@ -2910,7 +3770,7 @@ export function TimetableBuilderPage() {
                   mode="time"
                   value={newBandStart}
                   onChange={setNewBandStart}
-                  disabled={actionLoading}
+                  disabled={actionLoading || isSystemLocked}
                 />
               </div>
               <div className="form-field">
@@ -2920,18 +3780,23 @@ export function TimetableBuilderPage() {
                   mode="time"
                   value={newBandEnd}
                   onChange={setNewBandEnd}
-                  disabled={actionLoading}
+                  disabled={actionLoading || isSystemLocked}
                 />
               </div>
-              <div className="form-field timetable-inline-action">
+              <div className="flex-shrink-0">
                 <label className="sr-only" htmlFor="addBandButton">Add time band</label>
-                <button id="addBandButton" type="submit" className="btn btn-primary" disabled={actionLoading}>
+                <button
+                  id="addBandButton"
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={actionLoading || isSystemLocked}
+                >
                   Add Time Band
                 </button>
               </div>
             </form>
 
-            <div className="form-row timetable-inline-form">
+            <div className="flex gap-4 mb-6 items-center">
               <div className="form-field">
                 <label htmlFor="blockLabelInput">Block label</label>
                 <input
@@ -2941,10 +3806,10 @@ export function TimetableBuilderPage() {
                   value={blockLabel}
                   onChange={(e) => setBlockLabel(e.target.value)}
                   placeholder="e.g. L1"
-                  disabled={actionLoading}
+                  disabled={actionLoading || isSystemLocked}
                 />
               </div>
-              <div className="form-field timetable-inline-hint">
+              <div className="text-sm text-gray-500">
                 <span>
                   Click an empty cell to create a 1-slot block. Drag vertically in a day column to create a merged block.
                 </span>
@@ -2973,13 +3838,13 @@ export function TimetableBuilderPage() {
         )}
 
         {selectedSystemId !== "" && !loadingGrid && grid && days.length > 0 && timeBands.length > 0 && (
-          <div className="timetable-grid-wrapper" onMouseUp={() => void commitSelection()}>
-            <table className="timetable-grid" aria-label="Timetable slot grid">
+          <div className="overflow-x-auto border rounded-lg" onMouseUp={() => void commitSelection()}>
+            <table className="w-full border-collapse bg-white" aria-label="Timetable slot grid">
               <thead>
                 <tr>
                   <th
                     scope="col"
-                    className="timetable-time-header"
+                    className="px-4 py-3 border text-left text-sm font-semibold bg-gray-100"
                     rowSpan={hasMultipleLanes ? 2 : 1}
                   >
                     Time
@@ -2988,17 +3853,17 @@ export function TimetableBuilderPage() {
                     <th
                       key={day.id}
                       scope="col"
-                      className="timetable-day-header"
+                      className="px-4 py-3 border text-left text-sm font-semibold bg-gray-100"
                       colSpan={hasMultipleLanes ? dayLaneInfo.laneCountByDay.get(day.id) ?? 1 : undefined}
                     >
-                      <div className="timetable-day-header-content">
+                      <div className="flex items-center justify-between gap-2">
                         <span>{DAY_LABELS[day.dayOfWeek]}</span>
-                        <div className="timetable-day-header-actions">
+                        <div className="flex gap-1">
                           <button
                             type="button"
-                            className="timetable-add-lane"
+                            className="inline-flex items-center justify-center w-6 h-6 text-sm font-bold bg-blue-500 text-white hover:bg-blue-600 rounded border-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                             onClick={() => void handleAddLane(day.id)}
-                            disabled={actionLoading}
+                            disabled={actionLoading || isSystemLocked}
                             title="Add lane"
                             aria-label={`Add lane for ${DAY_LABELS[day.dayOfWeek]}`}
                           >
@@ -3006,9 +3871,9 @@ export function TimetableBuilderPage() {
                           </button>
                           <button
                             type="button"
-                            className="timetable-remove-lane"
+                            className="inline-flex items-center justify-center w-6 h-6 text-sm font-bold bg-orange-500 text-white hover:bg-orange-600 rounded border-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                             onClick={() => void handleRemoveLane(day)}
-                            disabled={actionLoading || day.laneCount <= 1}
+                            disabled={actionLoading || isSystemLocked || day.laneCount <= 1}
                             title="Remove lane"
                             aria-label={`Remove lane for ${DAY_LABELS[day.dayOfWeek]}`}
                           >
@@ -3016,9 +3881,9 @@ export function TimetableBuilderPage() {
                           </button>
                           <button
                             type="button"
-                            className="timetable-delete-day"
+                            className="inline-flex items-center justify-center w-6 h-6 text-lg font-bold bg-red-500 text-white hover:bg-red-600 rounded border-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                             onClick={() => void handleDeleteDay(day)}
-                            disabled={actionLoading}
+                            disabled={actionLoading || isSystemLocked}
                             title="Delete day"
                             aria-label={`Delete ${DAY_LABELS[day.dayOfWeek]}`}
                           >
@@ -3037,7 +3902,7 @@ export function TimetableBuilderPage() {
                         <th
                           key={`${day.id}-${laneIndex}`}
                           scope="col"
-                          className="timetable-day-subheader"
+                          className="px-4 py-3 border text-left text-xs font-medium bg-gray-50"
                         >
                           {laneCount > 1 ? `Lane ${laneIndex + 1}` : "Slot"}
                         </th>
@@ -3049,32 +3914,32 @@ export function TimetableBuilderPage() {
               <tbody>
                 {timeBands.map((band, bandIndex) => (
                   <tr key={band.id}>
-                    <th scope="row" className="timetable-time-cell">
+                    <th scope="row" className="px-4 py-3 border text-left text-sm font-semibold bg-gray-100 align-top">
                       {editingBandId === band.id ? (
-                        <div className="timetable-time-band-editor">
-                          <div className="timetable-time-band-inputs">
+                        <div className="flex flex-col gap-2">
+                          <div className="flex gap-2 items-center">
                             <DateInput
-                              className="timetable-time-band-input"
+                              className="px-2 py-1 border rounded"
                               mode="time"
                               value={editingBandStart}
                               onChange={setEditingBandStart}
                               disabled={actionLoading}
                             />
-                            <span className="timetable-time-band-separator">to</span>
+                            <span className="text-xs font-medium">to</span>
                             <DateInput
-                              className="timetable-time-band-input"
+                              className="px-2 py-1 border rounded"
                               mode="time"
                               value={editingBandEnd}
                               onChange={setEditingBandEnd}
                               disabled={actionLoading}
                             />
                           </div>
-                          <div className="timetable-time-band-actions">
+                          <div className="flex gap-2">
                             <button
                               type="button"
                               className="btn btn-primary btn-sm"
                               onClick={() => void handleUpdateTimeBand(band.id)}
-                              disabled={actionLoading}
+                              disabled={actionLoading || isSystemLocked}
                             >
                               {actionLoading ? "Saving..." : "Save"}
                             </button>
@@ -3089,16 +3954,16 @@ export function TimetableBuilderPage() {
                           </div>
                         </div>
                       ) : (
-                        <div className="timetable-time-band-row">
-                          <span className="timetable-time-band-range">
+                        <div className="flex flex-col gap-2">
+                          <span className="text-sm font-medium">
                             {toTimeLabel(String(band.startTime))} - {toTimeLabel(String(band.endTime))}
                           </span>
-                          <div className="timetable-time-band-actions">
+                          <div className="flex gap-1">
                             <button
                               type="button"
-                              className="timetable-icon-btn timetable-icon-btn-edit"
+                              className="inline-flex items-center justify-center w-6 h-6 text-xs text-blue-600 hover:bg-blue-50 rounded border border-blue-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                               onClick={() => startEditingTimeBand(band)}
-                              disabled={actionLoading}
+                              disabled={actionLoading || isSystemLocked}
                               title="Edit time band"
                               aria-label={`Edit time band ${toTimeLabel(String(band.startTime))} to ${toTimeLabel(String(band.endTime))}`}
                             >
@@ -3111,14 +3976,14 @@ export function TimetableBuilderPage() {
                             </button>
                             <button
                               type="button"
-                              className="timetable-icon-btn timetable-icon-btn-delete"
+                              className="inline-flex items-center justify-center w-6 h-6 text-xs text-red-600 hover:bg-red-50 rounded border border-red-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                               onClick={() => void handleDeleteTimeBand(band.id)}
-                              disabled={actionLoading}
+                              disabled={actionLoading || isSystemLocked}
                               title="Delete time band"
                               aria-label={`Delete time band ${toTimeLabel(String(band.startTime))} to ${toTimeLabel(String(band.endTime))}`}
                             >
                               {deletingBandId === band.id ? (
-                                <span className="timetable-icon-loading" aria-hidden="true">...</span>
+                                <span aria-hidden="true" className="text-xs">...</span>
                               ) : (
                                 <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
                                   <path
@@ -3150,17 +4015,17 @@ export function TimetableBuilderPage() {
                             <td
                               key={`${day.id}-${laneIndex}-${band.id}`}
                               rowSpan={safeRowSpan}
-                              className="timetable-cell timetable-cell-block"
+                              className="border p-2 bg-blue-50"
                             >
                               <button
                                 type="button"
-                                className="timetable-block"
+                                className="w-full px-3 py-2 bg-blue-600 text-white text-xs font-semibold rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                                 onClick={() => void handleDeleteBlock(block.id)}
-                                disabled={actionLoading}
+                                disabled={actionLoading || isSystemLocked}
                                 title="Delete block"
                               >
-                                <span className="timetable-block-label">{block.label}</span>
-                                <span className="timetable-block-delete">Delete</span>
+                                <span className="block truncate">{block.label}</span>
+                                <span className="block text-xs">Delete</span>
                               </button>
                             </td>
                           );
@@ -3168,14 +4033,20 @@ export function TimetableBuilderPage() {
 
                         const isSelecting = isCellSelected(day.id, laneIndex, bandIndex);
 
+                        const isCellReadOnly = isSystemLocked;
+
                         return (
                           <td
                             key={`${day.id}-${laneIndex}-${band.id}`}
-                            className={`timetable-cell timetable-cell-empty ${isSelecting ? "is-selecting" : ""}`}
+                            className={`border p-4 text-center text-xs font-semibold transition-colors ${
+                              isCellReadOnly
+                                ? "cursor-not-allowed bg-gray-50 text-gray-400"
+                                : `cursor-pointer text-gray-500 hover:bg-gray-100 ${isSelecting ? "bg-blue-100 text-blue-700" : "bg-white"}`
+                            }`}
                             onMouseDown={() => handleEmptyCellMouseDown(day.id, laneIndex, bandIndex)}
                             onMouseEnter={() => handleEmptyCellMouseEnter(day.id, laneIndex, bandIndex)}
                           >
-                            <span className="timetable-cell-hint">{isSelecting ? "Merge" : "Add"}</span>
+                            <span>{isCellReadOnly ? "Locked" : isSelecting ? "Merge" : "Add"}</span>
                           </td>
                         );
                       });
@@ -3187,6 +4058,669 @@ export function TimetableBuilderPage() {
           </div>
         )}
       </div>
+      )}
+
+      {showStructureSection && (
+      <div
+        id="timetable-maintenance-section"
+        className="border rounded-lg p-6 mb-8 mx-4 bg-white"
+        style={{ order: 3 }}
+      >
+        <div className="card-header">
+          <h3>Slot System Maintenance</h3>
+          <span className="badge badge-role">
+            {selectedSystem ? selectedSystem.name : "No system selected"}
+          </span>
+        </div>
+
+        <div className="mb-4 inline-flex rounded-md border border-gray-200 bg-gray-100 p-1">
+          <button
+            type="button"
+            className={`px-3 py-1 text-sm rounded ${
+              maintenanceTab === "SLOT_SYSTEM" ? "bg-white shadow" : "text-gray-600"
+            }`}
+            onClick={() => setMaintenanceTab("SLOT_SYSTEM")}
+          >
+            Slot System
+          </button>
+          <button
+            type="button"
+            className={`px-3 py-1 text-sm rounded ${
+              maintenanceTab === "DANGER_ZONE" ? "bg-white shadow text-red-700" : "text-red-600"
+            }`}
+            onClick={() => setMaintenanceTab("DANGER_ZONE")}
+          >
+            Danger Zone
+          </button>
+        </div>
+
+        {maintenanceTab === "SLOT_SYSTEM" ? (
+          <div className="form-field">
+            <label>Selected slot system actions</label>
+            <div className="btn-group">
+              <button
+                type="button"
+                className="btn btn-warning"
+                onClick={() => void handlePruneSelectedSlotSystemBookings()}
+                disabled={actionLoading || selectedSystemId === ""}
+              >
+                Prune Selected Slot System Bookings
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => void handleDeleteSlotSystem()}
+                disabled={actionLoading || selectedSystemId === ""}
+              >
+                Delete Slot System
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded border border-red-300 bg-red-50 p-4">
+            <h4 className="text-sm font-semibold text-red-700">Global Danger Zone</h4>
+            <p className="text-sm text-red-700 mt-1">
+              Prune all bookings removes imported and manual bookings across every slot system.
+            </p>
+            <button
+              type="button"
+              className="btn btn-danger mt-3"
+              onClick={() => void handlePruneAllBookings()}
+              disabled={actionLoading}
+            >
+              Prune All Bookings
+            </button>
+          </div>
+        )}
+
+        {successMessage && <div className="alert alert-success mt-4">{successMessage}</div>}
+      </div>
+      )}
+
+      </div>
+
+      {/* Freeze Status Banner */}
+      {isCommitFreezeActive && (
+        <div
+          className="fixed top-0 left-0 right-0 z-40 p-3 text-center text-white"
+          style={{ backgroundColor: "#dc3545" }}
+        >
+          ⚠️ <strong>Booking Freeze Active:</strong> Commit session is currently frozen for final validation.
+          New booking operations are blocked until commit completes or is cancelled.
+        </div>
+      )}
+
+      {/* Conflict Resolution Dialog */}
+      {showConflictDialog && conflictReport && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ backgroundColor: "rgba(0,0,0,0.5)" }}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl p-6 w-full max-w-3xl max-h-[80vh] overflow-y-auto"
+            id="conflictResolutionDialog"
+          >
+            <h3 className="text-xl font-bold mb-4">
+              ⚠️ {toCommitStageLabel(conflictStage ?? "runtime")} Conflicts ({conflictReport.conflictCount})
+            </h3>
+            <p className="text-gray-600 mb-4">
+              {conflictStage === "runtime"
+                ? "Resolve runtime clashes while freeze is active."
+                : "Resolve pre-freeze clashes before moving to the next stage."}
+            </p>
+
+            {conflictStage !== "runtime" && (
+              <div className="mb-4 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                Pre-freeze clashes are grouped by timetable allocation. Any resolution here is applied
+                across all linked occurrences in the current timetable system.
+              </div>
+            )}
+
+            {conflictStage === "runtime" && (
+              <div className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <div className="font-semibold">Grouped Runtime Conflicts</div>
+                {Array.from(
+                  conflictReport.conflicts.reduce((map, conflict) => {
+                    const key = `Row ${conflict.rowIndex}`;
+                    const current = map.get(key) ?? 0;
+                    map.set(key, current + 1);
+                    return map;
+                  }, new Map<string, number>()),
+                ).map(([rowLabel, count]) => (
+                  <div key={rowLabel}>{rowLabel}: {count} conflict(s)</div>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-4">
+              {conflictReport.conflicts.map((conflict) => {
+                const resolution = conflictResolutions[conflict.id];
+                const conflictRoomLabel = roomLabelById.get(conflict.roomId) || `Room #${conflict.roomId}`;
+                const metadata = conflict.metadata ?? {};
+                const conflictingBookingId = readMetadataNumber(metadata, "conflictingBookingId");
+                const conflictingStartAt = readMetadataString(metadata, "conflictingStartAt");
+                const conflictingEndAt = readMetadataString(metadata, "conflictingEndAt");
+                const secondaryRowIndex = readMetadataNumber(metadata, "secondaryRowIndex");
+                const affectedOperationCount = readMetadataNumber(metadata, "affectedOperationCount");
+                const activeTarget: CommitResolutionTarget = resolution?.target ?? "COMMITTING";
+                const roomResolutionMode = resolution?.roomResolutionMode ?? "SELECT_EXISTING";
+                const slotStartDraft = resolution?.startAt ?? toDateInputValue(conflict.startAt);
+                const slotEndDraft = resolution?.endAt ?? toDateInputValue(conflict.endAt);
+
+                return (
+                  <div
+                    key={conflict.id}
+                    className="border rounded p-4"
+                    style={{ borderColor: resolution ? "#28a745" : "#ffc107" }}
+                  >
+                    <div className="font-medium mb-2">
+                      Affected Row: #{conflict.rowIndex} ·
+                      {" "}
+                      Requested Slot - Room: {conflictRoomLabel},{" "}
+                      {new Date(conflict.startAt).toLocaleString()} → {new Date(conflict.endAt).toLocaleString()}
+                    </div>
+                    <div className="text-sm text-gray-500 mb-2">
+                      {conflict.reason}
+                      {conflictingBookingId !== null ? ` (Booking #${conflictingBookingId})` : ""}
+                      {secondaryRowIndex !== null ? ` (Also overlaps with row ${secondaryRowIndex})` : ""}
+                    </div>
+                    {conflictingStartAt && conflictingEndAt && (
+                      <div className="text-xs text-gray-500 mb-3">
+                        Existing overlap window: {new Date(conflictingStartAt).toLocaleString()} →{" "}
+                        {new Date(conflictingEndAt).toLocaleString()}
+                      </div>
+                    )}
+
+                    {conflictStage !== "runtime" &&
+                      affectedOperationCount !== null &&
+                      affectedOperationCount > 0 && (
+                        <div className="text-xs text-blue-700 mb-3">
+                          Resolution scope: {affectedOperationCount} grouped occurrence(s).
+                        </div>
+                      )}
+
+                    <div className="space-y-3">
+                      {conflictStage !== "runtime" && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium">Apply To</span>
+                          <select
+                            className="input"
+                            style={{ maxWidth: "220px" }}
+                            value={activeTarget}
+                            onChange={(e) => {
+                              const nextTarget = e.target.value as CommitResolutionTarget;
+                              setConflictResolutions((prev) => ({
+                                ...prev,
+                                [conflict.id]: {
+                                  ...(prev[conflict.id] ?? { action: "SKIP" }),
+                                  target: nextTarget,
+                                },
+                              }));
+                            }}
+                          >
+                            <option value="COMMITTING">Committing Allocation</option>
+                            <option value="CLASHING">Clashing Allocation</option>
+                          </select>
+                        </div>
+                      )}
+
+                      <div className="flex gap-3 flex-wrap items-center">
+                        {conflictStage === "runtime" && (
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`resolution-${conflict.id}`}
+                              checked={resolution?.action === "FORCE_OVERWRITE"}
+                              onChange={() =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? {}),
+                                    action: "FORCE_OVERWRITE",
+                                  },
+                                }))
+                              }
+                            />
+                            <span className="text-sm font-medium">Force Overwrite</span>
+                          </label>
+                        )}
+
+                        {conflictStage !== "runtime" && (
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`resolution-${conflict.id}`}
+                              checked={resolution?.action === "CHANGE_ROOM"}
+                              onChange={() =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? {}),
+                                    action: "CHANGE_ROOM",
+                                    target: activeTarget,
+                                    roomResolutionMode:
+                                      prev[conflict.id]?.roomResolutionMode ?? "SELECT_EXISTING",
+                                  },
+                                }))
+                              }
+                            />
+                            <span className="text-sm font-medium">Change Room</span>
+                          </label>
+                        )}
+
+                        {conflictStage !== "runtime" && (
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`resolution-${conflict.id}`}
+                              checked={resolution?.action === "CHANGE_SLOT_EXISTING"}
+                              onChange={() =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? {}),
+                                    action: "CHANGE_SLOT_EXISTING",
+                                    target: activeTarget,
+                                    startAt: prev[conflict.id]?.startAt ?? slotStartDraft,
+                                    endAt: prev[conflict.id]?.endAt ?? slotEndDraft,
+                                  },
+                                }))
+                              }
+                            />
+                            <span className="text-sm font-medium">Change Slot (Existing)</span>
+                          </label>
+                        )}
+
+                        {conflictStage !== "runtime" && (
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`resolution-${conflict.id}`}
+                              checked={resolution?.action === "CREATE_SLOT_AND_USE"}
+                              onChange={() =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? {}),
+                                    action: "CREATE_SLOT_AND_USE",
+                                    target: activeTarget,
+                                    startAt: prev[conflict.id]?.startAt ?? slotStartDraft,
+                                    endAt: prev[conflict.id]?.endAt ?? slotEndDraft,
+                                  },
+                                }))
+                              }
+                            />
+                            <span className="text-sm font-medium">Create Slot And Use</span>
+                          </label>
+                        )}
+
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="radio"
+                            name={`resolution-${conflict.id}`}
+                            checked={resolution?.action === "SKIP"}
+                            onChange={() =>
+                              setConflictResolutions((prev) => ({
+                                ...prev,
+                                [conflict.id]: {
+                                  ...(prev[conflict.id] ?? {}),
+                                  action: "SKIP",
+                                  ...(conflictStage !== "runtime" ? { target: activeTarget } : {}),
+                                },
+                              }))
+                            }
+                          />
+                          <span className="text-sm font-medium">Skip</span>
+                        </label>
+
+                        {conflictStage === "runtime" && (
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`resolution-${conflict.id}`}
+                              checked={resolution?.action === "ALTERNATIVE_ROOM"}
+                              onChange={() =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? {}),
+                                    action: "ALTERNATIVE_ROOM",
+                                  },
+                                }))
+                              }
+                            />
+                            <span className="text-sm font-medium">Alternative Room</span>
+                          </label>
+                        )}
+                      </div>
+
+                      {(resolution?.action === "CHANGE_SLOT_EXISTING" ||
+                        resolution?.action === "CREATE_SLOT_AND_USE") && (
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div>
+                            <label className="block text-xs font-medium mb-1">Slot Start</label>
+                            <DateInput
+                              mode="datetime"
+                              value={slotStartDraft}
+                              onChange={(nextValue) =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? {
+                                      action: resolution?.action ?? "CHANGE_SLOT_EXISTING",
+                                    }),
+                                    startAt: nextValue,
+                                  },
+                                }))
+                              }
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium mb-1">Slot End</label>
+                            <DateInput
+                              mode="datetime"
+                              value={slotEndDraft}
+                              onChange={(nextValue) =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? {
+                                      action: resolution?.action ?? "CHANGE_SLOT_EXISTING",
+                                    }),
+                                    endAt: nextValue,
+                                  },
+                                }))
+                              }
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {(resolution?.action === "ALTERNATIVE_ROOM" ||
+                        resolution?.action === "CHANGE_ROOM") && (
+                        <div className="space-y-2">
+                          {conflictStage !== "runtime" && resolution?.action === "CHANGE_ROOM" && (
+                            <select
+                              className="input"
+                              style={{ maxWidth: "260px" }}
+                              value={roomResolutionMode}
+                              onChange={(e) =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? { action: "CHANGE_ROOM" }),
+                                    roomResolutionMode: e.target.value as "SELECT_EXISTING" | "CREATE_ROOM",
+                                  },
+                                }))
+                              }
+                            >
+                              <option value="SELECT_EXISTING">Select Existing Room</option>
+                              <option value="CREATE_ROOM">Create Room</option>
+                            </select>
+                          )}
+
+                          {(conflictStage === "runtime" || roomResolutionMode === "SELECT_EXISTING") && (
+                            <select
+                              className="input"
+                              style={{ maxWidth: "260px" }}
+                              value={resolution?.roomId ?? ""}
+                              onChange={(e) =>
+                                setConflictResolutions((prev) => ({
+                                  ...prev,
+                                  [conflict.id]: {
+                                    ...(prev[conflict.id] ?? {
+                                      action: resolution?.action ?? "CHANGE_ROOM",
+                                    }),
+                                    roomId: Number(e.target.value) || undefined,
+                                  },
+                                }))
+                              }
+                            >
+                              <option value="">Select room...</option>
+                              {rooms.map((room: Room) => (
+                                <option key={room.id} value={room.id}>
+                                  {roomLabelById.get(room.id) ?? room.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+
+                          {conflictStage !== "runtime" &&
+                            resolution?.action === "CHANGE_ROOM" &&
+                            roomResolutionMode === "CREATE_ROOM" && (
+                              <div className="grid gap-2 sm:grid-cols-2">
+                                <select
+                                  className="input"
+                                  value={resolution?.createRoomBuildingId ?? ""}
+                                  onChange={(e) =>
+                                    setConflictResolutions((prev) => ({
+                                      ...prev,
+                                      [conflict.id]: {
+                                        ...(prev[conflict.id] ?? { action: "CHANGE_ROOM" }),
+                                        createRoomBuildingId:
+                                          e.target.value === "" ? "" : Number(e.target.value),
+                                      },
+                                    }))
+                                  }
+                                >
+                                  <option value="">Select building...</option>
+                                  {buildings.map((building) => (
+                                    <option key={building.id} value={building.id}>
+                                      {building.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <input
+                                  className="input"
+                                  type="text"
+                                  value={resolution?.createRoomName ?? ""}
+                                  placeholder="New room name"
+                                  onChange={(e) =>
+                                    setConflictResolutions((prev) => ({
+                                      ...prev,
+                                      [conflict.id]: {
+                                        ...(prev[conflict.id] ?? { action: "CHANGE_ROOM" }),
+                                        createRoomName: e.target.value,
+                                      },
+                                    }))
+                                  }
+                                />
+                              </div>
+                            )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-3 mt-6 justify-end">
+              <button
+                className="btn btn-ghost"
+                onClick={() => void handleCancelCommit()}
+                disabled={conflictLoading}
+              >
+                Cancel Commit
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => void handleResolveConflicts()}
+                disabled={conflictLoading}
+              >
+                {conflictLoading
+                  ? "Applying..."
+                  : conflictStage === "runtime"
+                    ? "Apply Runtime Resolutions"
+                    : "Apply and Continue"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Change Workspace Panel */}
+      {showChangeWorkspace && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ backgroundColor: "rgba(0,0,0,0.5)" }}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl max-h-[80vh] overflow-y-auto"
+            id="changeWorkspacePanel"
+          >
+            <h3 className="text-xl font-bold mb-4">✏️ Slot System Change Workspace</h3>
+                       {editSessionStatus !== "VIEW" && (
+                         <div className="p-3 rounded mb-4 text-sm" style={{ backgroundColor: "#e3f2fd", color: "#1565c0" }}>
+                           <strong>Status:</strong> Edit in progress · {editSessionStatus === "EDITING" ? "Running conflict checks" : "Finalizing changes"}
+                         </div>
+                       )}
+            <p className="text-gray-600 mb-4">
+              Preview and apply structural changes to the locked slot system.
+              Changes will acquire a booking freeze during application.
+            </p>
+
+            {changeError && (
+              <div className="p-3 rounded mb-4 text-sm" style={{ backgroundColor: "#f8d7da", color: "#721c24" }}>
+                {changeError}
+              </div>
+            )}
+
+            {changeSuccess && (
+              <div className="p-3 rounded mb-4 text-sm" style={{ backgroundColor: "#d4edda", color: "#155724" }}>
+                {changeSuccess}
+              </div>
+            )}
+
+            {changePreview && (
+              <div className="border rounded p-4 mb-4">
+                <h4 className="font-medium mb-2">Current System Status</h4>
+                <p className="text-sm text-gray-600">
+                  Lock Status: {changePreview.isLocked ? "Locked" : "Unlocked"}
+                </p>
+                {changePreview.affectedBatches.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-sm font-medium">Committed Batches:</p>
+                    {changePreview.affectedBatches.map((batch) => (
+                      <p key={batch.batchId} className="text-sm text-gray-500">
+                        Batch status: {batch.status} ({batch.affectedOccurrences} affected occurrences)
+                      </p>
+                    ))}
+                  </div>
+                )}
+                {changePreview.warnings.length > 0 && (
+                  <div className="mt-2">
+                    {changePreview.warnings.map((w, i) => (
+                      <p key={i} className="text-sm text-amber-600">⚠️ {w}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="text-sm text-gray-500 mb-4">
+              Edit mode computes a deterministic diff from the latest committed snapshot, then runs staged conflict checks only for affected rows.
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium mb-2" htmlFor="editDraftJson">
+                Proposed Snapshot (JSON)
+              </label>
+              <textarea
+                id="editDraftJson"
+                className="input"
+                rows={10}
+                value={editDraftJson}
+                onChange={(event) => setEditDraftJson(event.target.value)}
+                placeholder="Paste or edit snapshot JSON..."
+                disabled={editStartLoading}
+              />
+            </div>
+
+            <label className="flex items-center gap-2 text-sm mb-4">
+              <input
+                type="checkbox"
+                checked={editPruneBookings}
+                onChange={(event) => setEditPruneBookings(event.target.checked)}
+                disabled={editStartLoading}
+              />
+              <span>Prune obsolete bookings for changed rows during finalize</span>
+            </label>
+            {editPruneBookings && editStartResult && editStartResult.diff.bookingImpact.totalAffectedBookings > 0 && (
+              <p className="text-sm text-red-600 mb-4">
+                Step 1: {editStartResult.diff.bookingImpact.totalAffectedBookings} bookings will be removed.
+              </p>
+            )}
+
+            {editStartResult && (
+              <div className="border rounded p-4 mb-4 bg-gray-50">
+                <h4 className="font-medium mb-2">Last Edit Diff</h4>
+                <p className="text-sm text-gray-700">
+                  Changed labels: {editStartResult.diff.changedLabels.length} · Affected rows: {editStartResult.diff.affectedRows} · Unchanged rows: {editStartResult.diff.unchangedRows}
+                </p>
+                <p className="text-sm text-gray-600 mt-1">
+                  {formatEditDiffSummary(editStartResult.diff)}
+                </p>
+                <p className="text-sm text-blue-600 mt-1 font-medium">
+                  {formatBookingImpactMessage(editStartResult.diff.bookingImpact.totalAffectedBookings)}
+                </p>
+                {editStartResult.diff.operations.length > 0 && (
+                  <div className="mt-2 max-h-40 overflow-y-auto border rounded bg-white p-2">
+                    {groupOperationsByGroupId(editStartResult.diff.operations).map((group) => (
+                      <details key={group.groupId} className="text-xs py-2 border-b last:border-b-0">
+                        <summary className="cursor-pointer font-medium text-gray-700">
+                          {group.type} · {group.operations.length} operation(s) · {group.totalBookingsImpacted} booking(s) affected
+                        </summary>
+                        <div className="ml-3 mt-1">
+                          {group.operations.map((operation, idx) => (
+                            <div key={`${operation.operationGroupId}-${idx}`} className="text-xs py-1 text-gray-600 border-l border-gray-300 pl-2">
+                              <strong>{operation.label}</strong> · {operation.oldDescriptorCount} → {operation.newDescriptorCount} slots
+                              {operation.affectedBookings > 0 && (
+                                <span className="text-orange-600 ml-1">
+                                  ({operation.affectedBookings} booking{operation.affectedBookings !== 1 ? "s" : ""})
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex gap-3 justify-end">
+              <button
+                className="btn btn-primary"
+                onClick={() => void handleStartEditCommit()}
+                disabled={
+                  editStartLoading ||
+                  changeLoading ||
+                  selectedSystemId === "" ||
+                  editSessionStatus === "COMMITTING"
+                }
+              >
+                 {editStartLoading ? "Starting..." : !editStartResult ? "Start Edit Commit" : "Proceed to Conflict Check"}
+              </button>
+              <button
+                className="btn btn-ghost"
+                 disabled={editSessionStatus === "COMMITTING"}
+                onClick={() => {
+                  setShowChangeWorkspace(false);
+                  setChangePreview(null);
+                  setChangeError(null);
+                  setChangeSuccess(null);
+                  setEditStartResult(null);
+                  setEditDraftJson("");
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
