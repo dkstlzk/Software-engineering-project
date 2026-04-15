@@ -20,6 +20,7 @@ export const createBookingSchema = z.object({
   startAt: dateTimeString,
   endAt: dateTimeString,
   courseId: z.number().int().positive('courseId must be a positive integer').optional(),
+  overrideHolidayWarning: z.boolean().optional(),
   metadata: z.record(z.any()).optional(),
 }).refine((data) => {
   const start = new Date(data.startAt);
@@ -101,6 +102,7 @@ export const listBookingsSchema = z.object({
 });
 
 export const bulkCreateBookingSchema = z.object({
+  overrideHolidayWarning: z.boolean().optional(),
   items: z.array(
     z.object({
       roomId: z.number().int().positive('roomId must be a positive integer'),

@@ -68,8 +68,8 @@ const counters = {
   bookingRequestsUpdated: 0,
   bookingsCreated: 0,
   bookingCourseLinksCreated: 0,
-  slotChangeRequestsCreated: 0,
-  venueChangeRequestsCreated: 0,
+  bookingEditRequestsCreated: 0,
+  bookingEditRequestsUpdated: 0,
   notificationsCreated: 0,
 };
 
@@ -469,69 +469,59 @@ async function linkBookingToRequest(client, bookingRequestId, bookingId) {
   );
 }
 
-async function ensureSlotChangeRequest(client, input) {
+async function ensureBookingEditRequest(client, input) {
   const existing = await client.query(
     `SELECT id
-       FROM slot_change_requests
-      WHERE reason = $1
+       FROM booking_edit_requests
+      WHERE booking_id = $1
+        AND requested_by = $2
+        AND proposed_room_id IS NOT DISTINCT FROM $3
+        AND proposed_start_at IS NOT DISTINCT FROM $4
+        AND proposed_end_at IS NOT DISTINCT FROM $5
       LIMIT 1`,
-    [input.reason],
-  );
-
-  if (existing.rowCount && existing.rowCount > 0) {
-    return existing.rows[0].id;
-  }
-
-  const inserted = await client.query(
-    `INSERT INTO slot_change_requests
-      (requested_by, course_id, current_booking_id, proposed_room_id, proposed_start, proposed_end, reason, status)
-     VALUES
-      ($1, $2, $3, $4, $5, $6, $7, 'PENDING')
-     RETURNING id`,
     [
+      input.bookingId,
       input.requestedBy,
-      input.courseId,
-      input.currentBookingId,
       input.proposedRoomId ?? null,
-      input.proposedStart,
-      input.proposedEnd,
-      input.reason,
+      input.proposedStartAt ?? null,
+      input.proposedEndAt ?? null,
     ],
-  );
-
-  counters.slotChangeRequestsCreated += 1;
-  return inserted.rows[0].id;
-}
-
-async function ensureVenueChangeRequest(client, input) {
-  const existing = await client.query(
-    `SELECT id
-       FROM venue_change_requests
-      WHERE reason = $1
-      LIMIT 1`,
-    [input.reason],
   );
 
   if (existing.rowCount && existing.rowCount > 0) {
-    return existing.rows[0].id;
+    const id = existing.rows[0].id;
+
+    await client.query(
+      `UPDATE booking_edit_requests
+          SET status = $2,
+              reviewed_by = $3,
+              updated_at = NOW()
+        WHERE id = $1`,
+      [id, input.status ?? "PENDING", input.reviewedBy ?? null],
+    );
+
+    counters.bookingEditRequestsUpdated += 1;
+    return id;
   }
 
   const inserted = await client.query(
-    `INSERT INTO venue_change_requests
-      (requested_by, course_id, current_booking_id, proposed_room_id, reason, status)
+    `INSERT INTO booking_edit_requests
+      (booking_id, proposed_room_id, proposed_start_at, proposed_end_at, status, requested_by, reviewed_by)
      VALUES
-      ($1, $2, $3, $4, $5, 'PENDING')
+      ($1, $2, $3, $4, $5, $6, $7)
      RETURNING id`,
     [
+      input.bookingId,
+      input.proposedRoomId ?? null,
+      input.proposedStartAt ?? null,
+      input.proposedEndAt ?? null,
+      input.status ?? "PENDING",
       input.requestedBy,
-      input.courseId,
-      input.currentBookingId,
-      input.proposedRoomId,
-      input.reason,
+      input.reviewedBy ?? null,
     ],
   );
 
-  counters.venueChangeRequestsCreated += 1;
+  counters.bookingEditRequestsCreated += 1;
   return inserted.rows[0].id;
 }
 
@@ -842,23 +832,22 @@ async function seedDevData() {
     await ensureBookingCourseLink(client, csLectureBookingId, courseCs101Id);
     await ensureBookingCourseLink(client, eeLectureBookingId, courseEe201Id);
 
-    // Slot and venue change requests
-    await ensureSlotChangeRequest(client, {
+    // Booking edit requests (replaces deprecated slot/venue change request tables)
+    await ensureBookingEditRequest(client, {
+      bookingId: csLectureBookingId,
       requestedBy: facultyCsId,
-      courseId: courseCs101Id,
-      currentBookingId: csLectureBookingId,
       proposedRoomId: roomLh201Id,
-      proposedStart: fixedDate(15, 10, 0),
-      proposedEnd: fixedDate(15, 11, 0),
-      reason: "[SEED] Need to shift due to guest lecture",
+      proposedStartAt: fixedDate(15, 10, 0),
+      proposedEndAt: fixedDate(15, 11, 0),
+      status: "PENDING",
     });
 
-    await ensureVenueChangeRequest(client, {
+    await ensureBookingEditRequest(client, {
+      bookingId: eeLectureBookingId,
       requestedBy: facultyEeId,
-      courseId: courseEe201Id,
-      currentBookingId: eeLectureBookingId,
       proposedRoomId: roomIc210Id,
-      reason: "[SEED] Need larger setup space for equipment",
+      status: "APPROVED",
+      reviewedBy: adminId,
     });
 
     // Notifications

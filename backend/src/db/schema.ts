@@ -9,13 +9,14 @@ import {
   index,
   check,
   integer,
+  date,
   timestamp,
   jsonb,
   varchar,
   json,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { slotSystems } from "../modules/timetable/schema";
+import { dayOfWeekEnum, slotSystems } from "../modules/timetable/schema";
 
 // Forward declaration for users reference (defined later in this file)
 // We use a late reference pattern here
@@ -107,6 +108,36 @@ export const bookings = pgTable("bookings", {
 
   sourceRef: text("source_ref"),
 });
+
+export const holidays = pgTable(
+  "holidays",
+  {
+    id: serial("id").primaryKey(),
+
+    name: text("name").notNull(),
+    description: text("description"),
+
+    startDate: date("start_date").notNull(),
+    endDate: date("end_date").notNull(),
+
+    createdBy: integer("created_by").references((): AnyPgColumn => users.id, {
+      onDelete: "set null",
+    }),
+
+    createdAt: timestamp("created_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    nameIdx: index("holidays_name_idx").on(table.name),
+    startDateIdx: index("holidays_start_date_idx").on(table.startDate),
+    endDateIdx: index("holidays_end_date_idx").on(table.endDate),
+    dateRangeCheck: check(
+      "holidays_date_range_check",
+      sql`${table.startDate} <= ${table.endDate}`,
+    ),
+  }),
+);
 
 export const timetableImportBatchStatusEnum = pgEnum(
   "timetable_import_batch_status",
@@ -619,6 +650,67 @@ export const users = pgTable(
     googleDomainCheck: check(
       "users_google_email_domain_check",
       sql`${table.registeredVia} <> 'google' OR lower(${table.email}) LIKE '%@iitj.ac.in'`,
+    ),
+  }),
+);
+
+export const systemPreferences = pgTable(
+  "system_preferences",
+  {
+    id: integer("id").primaryKey().notNull().default(1),
+    manualDataLoading: boolean("manual_data_loading").notNull().default(true),
+    autoLoadDependentData: boolean("auto_load_dependent_data")
+      .notNull()
+      .default(false),
+    autoLoadSections: jsonb("auto_load_sections")
+      .$type<Record<string, boolean>>()
+      .notNull()
+      .default(sql`'{"dashboard":false,"bookings":false,"rooms":false,"availability":false,"bookingRequests":false,"users":false}'::jsonb`),
+    updatedBy: integer("updated_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    updatedAt: timestamp("updated_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    singletonCheck: check(
+      "system_preferences_singleton_check",
+      sql`${table.id} = 1`,
+    ),
+    updatedByIdx: index("system_preferences_updated_by_idx").on(table.updatedBy),
+  }),
+);
+
+export const timetableDayOverrides = pgTable(
+  "timetable_day_overrides",
+  {
+    id: serial("id").primaryKey(),
+    targetDate: date("target_date").notNull(),
+    followsDayOfWeek: dayOfWeekEnum("follows_day_of_week").notNull(),
+    note: text("note"),
+    createdBy: integer("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+    updatedBy: integer("updated_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    updatedAt: timestamp("updated_at", { withTimezone: false })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    targetDateUnique: uniqueIndex("timetable_day_overrides_target_date_unique").on(
+      table.targetDate,
+    ),
+    followsDayIdx: index("timetable_day_overrides_follows_day_idx").on(
+      table.followsDayOfWeek,
+    ),
+    targetDateIdx: index("timetable_day_overrides_target_date_idx").on(
+      table.targetDate,
     ),
   }),
 );

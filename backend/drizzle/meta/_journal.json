@@ -197,6 +197,13 @@
       "when": 1775906500000,
       "tag": "0028_edit_booking_requests_core",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1776200000000,
+      "tag": "0029_holidays_core",
+      "breakpoints": true
     }
   ]
 }

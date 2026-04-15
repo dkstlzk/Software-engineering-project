@@ -467,7 +467,7 @@ export async function getRoomDayAvailabilityQuery(
   }
 ): Promise<RoomDayAvailability> {
   // Parse the date and construct full day range
-  const dayStart = new Date(`${dateStr}T00:00:00.000Z`);
+  const dayStart = new Date(`${dateStr}T00:00:00+05:30`);
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
 
@@ -692,7 +692,7 @@ export async function getRoomDayAvailabilityTimeline(
   }
 ): Promise<RoomDayTimeline> {
   // Parse date and construct 24-hour range (00:00 - 23:59:59)
-  const dayStart = new Date(`${dateStr}T00:00:00.000Z`);
+  const dayStart = new Date(`${dateStr}T00:00:00+05:30`);
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
 
@@ -913,7 +913,7 @@ function bookingOverlapsSlot(
   durationMinutes: number
 ): boolean {
   const [slotHour, slotMin] = slotTime.split(':').map(Number);
-  const slotStart = new Date(`${date}T${slotTime}:00.000Z`);
+  const slotStart = new Date(`${date}T${slotTime}:00+05:30`);
   const slotEnd = new Date(slotStart);
   slotEnd.setMinutes(slotEnd.getMinutes() + durationMinutes);
 
@@ -964,13 +964,13 @@ export async function getBuildingMatrixAvailability(
   const slots = generateTimeSlots(startTime, endTime, slotDuration);
 
   // Parse day boundaries
-  const dayStart = new Date(`${date}T00:00:00.000Z`);
+  const dayStart = new Date(`${date}T00:00:00+05:30`);
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
 
   // Construct time range boundaries for query
-  const queryStart = new Date(`${date}T${startTime}:00.000Z`);
-  const queryEnd = new Date(`${date}T${endTime}:00.000Z`);
+  const queryStart = new Date(`${date}T${startTime}:00+05:30`);
+  const queryEnd = new Date(`${date}T${endTime}:00+05:30`);
 
   // Get all rooms in building
   const roomsData = await db
