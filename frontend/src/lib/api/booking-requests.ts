@@ -1,5 +1,10 @@
 import { request } from "./client";
-import type { BookingRequest, BookingStatus, BookingEventType } from "./types";
+import type {
+  BookingEventType,
+  BookingRequest,
+  BookingRequestChangeResponse,
+  BookingStatus,
+} from "./types";
 
 export async function getBookingRequests(status?: BookingStatus): Promise<BookingRequest[]> {
   const query = status ? `?status=${encodeURIComponent(status)}` : "";
@@ -25,6 +30,7 @@ export async function createBookingRequest(input: {
   purpose: string;
   participantCount?: number;
   facultyId?: number;
+  overrideHolidayWarning?: boolean;
 }): Promise<BookingRequest> {
   return request<BookingRequest>("/booking-requests", {
     method: "POST",
@@ -32,9 +38,31 @@ export async function createBookingRequest(input: {
   });
 }
 
-export async function approveBookingRequest(id: number): Promise<void> {
+export async function changeBookingRequest(input: {
+  sourceRequestId?: number;
+  sourceBookingId?: number;
+  roomId?: number;
+  startAt?: string;
+  endAt?: string;
+  eventType?: BookingEventType;
+  purpose?: string;
+  participantCount?: number;
+  facultyId?: number;
+  overrideHolidayWarning?: boolean;
+}): Promise<BookingRequestChangeResponse> {
+  return request<BookingRequestChangeResponse>("/booking-requests/change", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function approveBookingRequest(
+  id: number,
+  input?: { overrideHolidayWarning?: boolean },
+): Promise<void> {
   await request<unknown>(`/booking-requests/${id}/approve`, {
     method: "POST",
+    body: JSON.stringify(input ?? {}),
   });
 }
 

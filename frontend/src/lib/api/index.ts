@@ -6,6 +6,11 @@ export type {
   UserRole,
   SetupRole,
   AuthUser,
+  SystemQoLSectionKey,
+  SystemAutoLoadSections,
+  SystemQoLPreferences,
+  SystemQoLPreferencesPatch,
+  SystemQoLSettings,
   AssignableUserRole,
   FacultyUser,
   ManagedUser,
@@ -18,7 +23,16 @@ export type {
   BookingEventType,
   BookingSource,
   BookingRequest,
+  BookingRequestChangeMode,
+  BookingRequestChangeResponse,
   Booking,
+  Holiday,
+  HolidayCreateResponse,
+  TimetableDayOverride,
+  DayOverrideRecomputeSlotSystemReport,
+  DayOverrideRecomputeSummary,
+  TimetableDayOverrideSaveResponse,
+  TimetableDayOverrideDeleteResponse,
   BookingEditRequestStatus,
   BookingEditRequest,
   EditBookingPayload,
@@ -32,6 +46,9 @@ export type {
   BookingPruneResult,
   AvailabilityRoom,
   AvailabilityBuilding,
+  MatrixAvailabilitySlot,
+  MatrixAvailabilityRoom,
+  BuildingMatrixAvailability,
   TimelineSegment,
   RoomDayTimeline,
   DayOfWeek,
@@ -139,6 +156,16 @@ export {
   deleteBuilding,
 } from "./buildings";
 
+// Holidays endpoints
+export {
+  getHolidays,
+  createHoliday,
+  deleteHoliday,
+  getTimetableDayOverrides,
+  saveTimetableDayOverride,
+  deleteTimetableDayOverride,
+} from "./holidays";
+
 // Rooms endpoints
 export {
   getRooms,
@@ -164,6 +191,7 @@ export {
 export {
   getBookingRequests,
   createBookingRequest,
+  changeBookingRequest,
   approveBookingRequest,
   forwardBookingRequest,
   rejectBookingRequest,
@@ -199,6 +227,7 @@ export {
 export {
   getAvailability,
   getRoomDayTimeline,
+  getBuildingMatrixAvailability,
 } from "./availability";
 
 // Dashboard endpoints
@@ -209,10 +238,17 @@ export {
   getActivityFeed,
 } from "./dashboard";
 
+// System settings endpoints
+export {
+  getSystemQoLSettings,
+  updateSystemQoLSettings,
+} from "./system-settings";
+
 // Slot system and Timetable import endpoints
 export {
   getSlotSystems,
   createSlotSystem,
+  duplicateSlotSystem,
   deleteSlotSystem,
   getDays,
   createDay,

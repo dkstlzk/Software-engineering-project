@@ -20,10 +20,11 @@ export function useFacultyUsers() {
   });
 }
 
-export function useManagedUsers(filters?: ManagedUsersFilters) {
+export function useManagedUsers(filters?: ManagedUsersFilters, enabled = true) {
   return useQuery({
     queryKey: ['managed-users', filters],
     queryFn: () => usersApi.getManagedUsers(filters),
+    enabled,
     ...queryConfigs.users,
   });
 }

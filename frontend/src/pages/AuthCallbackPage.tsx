@@ -137,7 +137,7 @@ export default function AuthCallbackPage() {
         await withTimeout(
           loginWithToken(pending.accessToken),
           CALLBACK_TIMEOUT_MS,
-          "Sign-in is taking too long. Verify backend API is running on http://localhost:5000, then try again.",
+          "Sign-in is taking too long. Verify backend API is reachable and NEXT_PUBLIC_API_URL is configured, then try again.",
         );
 
         if (isCancelled) {

@@ -7,13 +7,10 @@ const router = Router();
 
 /**
  * GET /health
- * Basic health check - always returns 200 if server is running
+ * Basic health check required by hosting platforms.
  */
-router.get('/', (req: Request, res: Response) => {
-  res.status(200).json({
-    status: 'ok',
-    timestamp: Date.now(),
-  });
+router.get('/', (_req: Request, res: Response) => {
+  res.status(200).type('text/plain').send('OK');
 });
 
 /**

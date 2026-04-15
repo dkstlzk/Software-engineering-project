@@ -8,33 +8,33 @@
 
 @layer base {
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
   }
   .theme {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif
   }
   :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 8%;
+    --background: 210 20% 98%;
+    --foreground: 215 22% 16%;
     --card: 0 0% 100%;
-    --card-foreground: 0 0% 8%;
+    --card-foreground: 215 22% 16%;
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 8%;
-    --primary: 0 0% 13%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 97%;
-    --secondary-foreground: 0 0% 13%;
-    --muted: 0 0% 97%;
-    --muted-foreground: 0 0% 55%;
-    --accent: 0 0% 97%;
-    --accent-foreground: 0 0% 13%;
-    --destructive: 0 84% 60%;
+    --popover-foreground: 215 22% 16%;
+    --primary: 214 45% 40%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 25% 96%;
+    --secondary-foreground: 215 22% 16%;
+    --muted: 210 22% 95%;
+    --muted-foreground: 215 12% 42%;
+    --accent: 210 22% 95%;
+    --accent-foreground: 215 22% 16%;
+    --destructive: 4 70% 52%;
     --destructive-foreground: 0 0% 100%;
-    --border: 0 0% 92%;
-    --input: 0 0% 92%;
-    --ring: 0 0% 71%;
-    --radius: 0.625rem;
+    --border: 215 18% 87%;
+    --input: 215 18% 87%;
+    --ring: 214 45% 46%;
+    --radius: 0.5rem;
     --radius-md: calc(var(--radius) - 2px);
     --radius-sm: calc(var(--radius) - 4px);
     --sidebar: 0 0% 99%;
@@ -87,7 +87,7 @@
   }
 
   .availability-search-form {
-    @apply bg-card rounded-lg border border-border p-6 space-y-6;
+    @apply bg-card rounded-md border border-border p-6 space-y-6;
   }
 
   .search-grid {
@@ -104,7 +104,7 @@
 
   .form-field input,
   .form-field select {
-    @apply w-full px-3 py-2 border border-border rounded-md bg-background text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent;
+    @apply w-full px-3 py-2 border border-border rounded-md bg-background text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring;
   }
 
   .form-field input:disabled,
@@ -129,7 +129,7 @@
   }
 
   .view-btn {
-    @apply px-4 py-2 border border-border rounded-md bg-background text-foreground hover:bg-muted transition-colors;
+    @apply px-4 py-2 border border-border rounded-md bg-background text-foreground hover:bg-muted transition-colors duration-100;
   }
 
   .view-btn.active {
@@ -137,7 +137,7 @@
   }
 
   .btn {
-    @apply px-4 py-2 rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary;
+    @apply px-4 py-2 rounded-md font-medium transition-colors duration-100 focus:outline-none focus:ring-2 focus:ring-ring/40;
   }
 
   .btn-primary {
@@ -183,7 +183,7 @@
   }
 
   .room-item {
-    @apply flex items-center justify-between p-4 border border-border rounded-md bg-background hover:bg-muted transition-colors;
+    @apply flex items-center justify-between p-4 border border-border rounded-md bg-background hover:bg-muted/70 transition-colors duration-100;
   }
 
   .room-item.avail {
@@ -297,16 +297,16 @@
   }
 
   .page-header h2 {
-    @apply text-3xl font-bold text-foreground mb-2;
+    @apply text-2xl font-semibold tracking-tight text-foreground mb-2;
   }
 
   .page-header p {
-    @apply text-muted-foreground;
+    @apply text-sm text-muted-foreground;
   }
 
   /* Cards and Sections */
   .card {
-    @apply bg-card border border-border rounded-lg p-6;
+    @apply bg-card border border-border rounded-md p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)];
   }
 
   .card-header {
@@ -314,7 +314,7 @@
   }
 
   .card-header h3 {
-    @apply text-lg font-semibold text-foreground;
+    @apply text-base font-semibold text-foreground;
   }
 
   .section-gap {
@@ -335,7 +335,7 @@
   }
 
   .input {
-    @apply w-full px-3 py-2 border border-border rounded-md bg-background text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-colors;
+    @apply w-full px-3 py-2 border border-border rounded-md bg-background text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-colors duration-100;
   }
 
   .input:disabled {
@@ -348,7 +348,7 @@
   }
 
   .data-item {
-    @apply flex items-center justify-between p-4 bg-card border border-border rounded-lg hover:bg-muted/50 transition-colors;
+    @apply flex items-center justify-between p-4 bg-card border border-border rounded-md hover:bg-muted/50 transition-colors duration-100;
   }
 
   .data-item-content {
@@ -369,7 +369,7 @@
 
   /* Buttons */
   .btn {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md font-medium transition-colors duration-100 focus:outline-none focus:ring-2 focus:ring-ring/40 disabled:opacity-50 disabled:cursor-not-allowed;
   }
 
   .btn-primary {
@@ -381,15 +381,15 @@
   }
 
   .btn-warning {
-    @apply bg-amber-500 text-white hover:bg-amber-600;
+    @apply bg-amber-600 text-white hover:bg-amber-700;
   }
 
   .btn-success {
-    @apply bg-green-600 text-white hover:bg-green-700;
+    @apply bg-emerald-600 text-white hover:bg-emerald-700;
   }
 
   .btn-ghost {
-    @apply bg-transparent text-foreground border border-border hover:bg-muted;
+    @apply bg-transparent text-foreground border border-border hover:bg-muted/70;
   }
 
   .btn-group {
@@ -402,7 +402,7 @@
 
   /* Alerts and Messages */
   .alert {
-    @apply p-4 rounded-lg border text-sm;
+    @apply p-4 rounded-md border text-sm;
   }
 
   .alert-error {

@@ -2,13 +2,62 @@ import { API_BASE_URL, AUTH_TOKEN_KEY, AUTH_REFRESH_TOKEN_KEY, AUTH_USER_KEY } f
 import type { AuthUser, ApiErrorPayload, RefreshTokenResponse } from "./types";
 import { formatError } from "../../utils/formatError";
 
-type EnhancedApiError = Error & { status?: number };
+type EnhancedErrorExtras = {
+  code?: string;
+  payload?: unknown;
+};
 
-function buildEnhancedError(message: string, status?: number): EnhancedApiError {
+type EnhancedApiError = Error & {
+  status?: number;
+  code?: string;
+  payload?: unknown;
+  response?: {
+    status: number;
+    data?: unknown;
+  };
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function extractErrorCode(payload: unknown): string | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+
+  if (typeof payload.code === "string" && payload.code.trim()) {
+    return payload.code;
+  }
+
+  if (isRecord(payload.error) && typeof payload.error.code === "string") {
+    return payload.error.code;
+  }
+
+  return undefined;
+}
+
+function buildEnhancedError(
+  message: string,
+  status?: number,
+  extras?: EnhancedErrorExtras,
+): EnhancedApiError {
   const enhancedError = new Error(message) as EnhancedApiError;
 
   if (status !== undefined) {
     enhancedError.status = status;
+    enhancedError.response = {
+      status,
+      data: extras?.payload,
+    };
+  }
+
+  if (extras?.code) {
+    enhancedError.code = extras.code;
+  }
+
+  if (extras?.payload !== undefined) {
+    enhancedError.payload = extras.payload;
   }
 
   return enhancedError;
@@ -215,7 +264,10 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       apiPayload?.error ?? apiPayload?.message ?? payload,
       httpErrorMessage(response.status, retryAfterSeconds),
     );
-    throw buildEnhancedError(message, status);
+    throw buildEnhancedError(message, status, {
+      code: extractErrorCode(payload),
+      payload,
+    });
   }
 
   return payload as T;
@@ -272,7 +324,10 @@ export async function requestFormData<T>(
       httpErrorMessage(response.status, retryAfterSeconds),
     );
 
-    throw buildEnhancedError(message, status);
+    throw buildEnhancedError(message, status, {
+      code: extractErrorCode(payload),
+      payload,
+    });
   }
 
   return payload as T;

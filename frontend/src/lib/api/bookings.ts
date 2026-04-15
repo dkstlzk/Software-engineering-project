@@ -31,6 +31,7 @@ export async function createBooking(input: {
   roomId: number;
   startAt: string;
   endAt: string;
+  overrideHolidayWarning?: boolean;
   metadata?: {
     source?: BookingSource;
     sourceRef?: string;

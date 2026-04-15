@@ -186,10 +186,10 @@ export default function AuthSetupPage() {
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-4xl font-bold text-slate-900 mb-2">
-            Welcome to Room Booking!
+            Room Booking Account Setup
           </h1>
           <p className="text-lg text-slate-600">
-            Let's set up your account to get started
+            Complete your account setup to continue.
           </p>
         </div>
 
@@ -404,9 +404,9 @@ export default function AuthSetupPage() {
                     <div className="flex justify-between items-center">
                       <span className="text-slate-600">Role:</span>
                       <span className="font-medium text-slate-900">
-                        {selectedRole === "STUDENT" && "👤 Student"}
-                        {selectedRole === "FACULTY" && "👨‍🏫 Faculty"}
-                        {selectedRole === "ADMIN" && "🔐 Admin"}
+                        {selectedRole === "STUDENT" && "Student"}
+                        {selectedRole === "FACULTY" && "Faculty"}
+                        {selectedRole === "ADMIN" && "Administrator"}
                       </span>
                     </div>
                     {selectedRole === "FACULTY" && watch("department") && (
@@ -421,7 +421,7 @@ export default function AuthSetupPage() {
                       <div className="flex justify-between items-center">
                         <span className="text-slate-600">Login Method:</span>
                         <span className="font-medium text-slate-900">
-                          {authProvider === "google" ? "🔐 Google OAuth" : "📧 Email/Password"}
+                          {authProvider === "google" ? "Google OAuth" : "Email and Password"}
                         </span>
                       </div>
                     )}

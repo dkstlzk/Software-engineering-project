@@ -20,6 +20,33 @@ export type AuthUser = {
   buildings?: Array<{ id: number; name: string }>;
 };
 
+export type SystemQoLSectionKey =
+  | "dashboard"
+  | "bookings"
+  | "rooms"
+  | "availability"
+  | "bookingRequests"
+  | "users";
+
+export type SystemAutoLoadSections = Record<SystemQoLSectionKey, boolean>;
+
+export type SystemQoLPreferences = {
+  manualDataLoading: boolean;
+  autoLoadDependentData: boolean;
+  autoLoadSections: SystemAutoLoadSections;
+};
+
+export type SystemQoLPreferencesPatch = Partial<
+  Omit<SystemQoLPreferences, "autoLoadSections">
+> & {
+  autoLoadSections?: Partial<SystemAutoLoadSections>;
+};
+
+export type SystemQoLSettings = SystemQoLPreferences & {
+  updatedBy: number | null;
+  updatedAt: string;
+};
+
 export type AssignableUserRole = "ADMIN" | "STAFF" | "FACULTY" | "STUDENT";
 
 export type FacultyUser = {
@@ -129,6 +156,15 @@ export type BookingRequest = {
   createdAt: string;
 };
 
+export type BookingRequestChangeMode =
+  | "UPDATED_EXISTING_REQUEST"
+  | "CREATED_CHANGE_REQUEST";
+
+export type BookingRequestChangeResponse = {
+  mode: BookingRequestChangeMode;
+  request: BookingRequest;
+};
+
 export type Booking = {
   id: number;
   roomId: number;
@@ -139,6 +175,73 @@ export type Booking = {
   approvedAt: string | null;
   source: BookingSource;
   sourceRef: string | null;
+};
+
+export type Holiday = {
+  id: number;
+  name: string;
+  description: string | null;
+  startDate: string;
+  endDate: string;
+  createdBy: number | null;
+  createdAt: string;
+};
+
+export type HolidayCreateResponse = {
+  holiday: Holiday;
+  prunedTimetableBookings: number;
+};
+
+export type TimetableDayOverride = {
+  id: number;
+  targetDate: string;
+  followsDayOfWeek: DayOfWeek;
+  note: string | null;
+  createdBy: number | null;
+  createdAt: string;
+  updatedBy: number | null;
+  updatedAt: string;
+};
+
+export type DayOverrideRecomputeSlotSystemReport = {
+  slotSystemId: number;
+  noChanges: boolean;
+  commitSessionId: number | null;
+  batchId: number | null;
+  affectedRows: number;
+  unchangedRows: number;
+  createdBookings: number;
+  skippedOperations: number;
+  deletedConflictingBookings: number;
+  autoResolvedExternalConflicts: number;
+  autoResolvedInternalConflicts: number;
+  autoResolvedRuntimeConflicts: number;
+  impactedBatchIds: number[];
+};
+
+export type DayOverrideRecomputeSummary = {
+  targetDate: string;
+  impactedSlotSystems: number;
+  processedSlotSystems: number;
+  noChangeSlotSystems: number;
+  createdBookings: number;
+  skippedOperations: number;
+  deletedConflictingBookings: number;
+  autoResolvedExternalConflicts: number;
+  autoResolvedInternalConflicts: number;
+  autoResolvedRuntimeConflicts: number;
+  slotSystems: DayOverrideRecomputeSlotSystemReport[];
+};
+
+export type TimetableDayOverrideSaveResponse = {
+  dayOverride: TimetableDayOverride;
+  recompute: DayOverrideRecomputeSummary;
+};
+
+export type TimetableDayOverrideDeleteResponse = {
+  deletedId: number;
+  targetDate: string;
+  recompute: DayOverrideRecomputeSummary;
 };
 
 export type BookingEditRequestStatus = "PENDING" | "APPROVED" | "REJECTED";
@@ -469,6 +572,28 @@ export type AvailabilityBuilding = {
   buildingId: number;
   buildingName: string;
   rooms: AvailabilityRoom[];
+};
+
+export type MatrixAvailabilitySlot = {
+  time: string;
+  status: "booked" | "available";
+  bookingCount: number;
+  bookings: BookingDetail[];
+};
+
+export type MatrixAvailabilityRoom = {
+  roomId: number;
+  roomName: string;
+  slots: MatrixAvailabilitySlot[];
+};
+
+export type BuildingMatrixAvailability = {
+  buildingId: number;
+  buildingName: string;
+  date: string;
+  timeRange: { start: string; end: string };
+  slotDuration: number;
+  matrix: MatrixAvailabilityRoom[];
 };
 
 export type TimelineSegment = {
@@ -985,8 +1110,15 @@ export type RefreshTokenResponse = {
 };
 
 export type ApiErrorPayload = {
-  error?: string;
+  error?: string | { code?: string; message?: string };
   message?: string;
+  code?: string;
+  holidays?: Array<{
+    id?: number;
+    name?: string;
+    startDate?: string;
+    endDate?: string;
+  }>;
 };
 
 export type TimetableImportBatchListResponse = {
@@ -996,6 +1128,9 @@ export type TimetableImportBatchListResponse = {
 export type DashboardStats = {
   totalBookingsThisMonth: number;
   pendingRequests: number;
+  pendingRequestsByFaculty: number;
+  pendingRequestsByStaff: number;
+  pendingRequestsToClear: number;
   roomUtilization: number;
   activeUsers: number;
 };

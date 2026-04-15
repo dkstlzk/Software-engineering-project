@@ -47,6 +47,7 @@ import {
 } from "../hooks/useProfile";
 import { request } from "../lib/api/client";
 import { LogOut, Lock, Download, Trash2 } from "lucide-react";
+import { formatDateTimeDDMMYYYY } from "../utils/datetime";
 
 // Form schemas
 const updateProfileSchema = z.object({
@@ -463,7 +464,7 @@ function SecuritySection() {
                     ) : null}
                   </div>
                   <p className="text-xs text-gray-600 mt-1">
-                    Created: {new Date(session.createdAt).toLocaleString()}
+                    Created: {formatDateTimeDDMMYYYY(session.createdAt)}
                   </p>
                   <p className="text-xs text-gray-600">
                     IP: {session.ipAddress ?? "Unknown"}
@@ -580,7 +581,7 @@ function ActivitySection() {
                   <p className="text-sm font-medium text-gray-900">{entry.title}</p>
                   <p className="text-xs text-gray-600 mt-1">{entry.description}</p>
                   <p className="text-xs text-gray-600 mt-1">
-                    {new Date(entry.timestamp).toLocaleString()}
+                    {formatDateTimeDDMMYYYY(entry.timestamp)}
                   </p>
                   {entry.metadata?.device || entry.metadata?.ipAddress ? (
                     <p className="text-xs text-gray-600 mt-1">

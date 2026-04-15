@@ -8,12 +8,14 @@ type BookingFilters = {
   buildingId?: number;
   startAt?: string;
   endAt?: string;
+  limit?: number;
 };
 
-export function useBookings(filters?: BookingFilters) {
+export function useBookings(filters?: BookingFilters, enabled = true) {
   return useQuery({
     queryKey: ['bookings', filters],
     queryFn: () => bookingsApi.getBookings(filters),
+    enabled,
     ...queryConfigs.bookings,
   });
 }

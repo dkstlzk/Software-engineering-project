@@ -58,4 +58,5 @@ export const queryConfigs = {
   // Static - event types and slot systems rarely change
   slotSystems: QUERY_CONFIG_STATIC,
   eventTypes: QUERY_CONFIG_STATIC,
+  systemQolSettings: QUERY_CONFIG_STATIC,
 };

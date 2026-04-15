@@ -56,6 +56,18 @@ export async function deleteSlotSystem(slotSystemId: number): Promise<void> {
   });
 }
 
+export async function duplicateSlotSystem(
+  slotSystemId: number,
+  name?: string,
+): Promise<SlotSystem> {
+  return request<SlotSystem>(`/timetable/slot-systems/${slotSystemId}/duplicate`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...(typeof name === "string" ? { name } : {}),
+    }),
+  });
+}
+
 // Days
 export async function getDays(slotSystemId: number): Promise<SlotDay[]> {
   const params = new URLSearchParams({ slotSystemId: String(slotSystemId) });

@@ -7,6 +7,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Loader2 } from "lucide-react";
 import { formatError } from "../utils/formatError";
+import { formatTimeHHMMSSIST } from "../utils/datetime";
 
 interface ToastProps {
   type: "error" | "success";
@@ -139,11 +140,7 @@ export default function LoginPage() {
       if (retryCountdownSeconds) {
         const now = new Date();
         const nextLoginDate = new Date(now.getTime() + retryCountdownSeconds * 1000);
-        nextLoginTime = nextLoginDate.toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        });
+        nextLoginTime = formatTimeHHMMSSIST(nextLoginDate);
       }
       
       setToast({

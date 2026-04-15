@@ -3,10 +3,11 @@ import * as buildingsApi from '../lib/api/buildings';
 import { queryConfigs } from '../lib/queryConfig';
 import type { CreateBuildingInput, UpdateBuildingInput } from '../lib/api/buildings';
 
-export function useBuildings() {
+export function useBuildings(enabled = true) {
   return useQuery({
     queryKey: ['buildings'],
     queryFn: () => buildingsApi.getBuildings(),
+    enabled,
     ...queryConfigs.buildings,
   });
 }
