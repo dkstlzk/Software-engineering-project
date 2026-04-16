@@ -22,8 +22,8 @@ export function RoomsPage() {
   const [editingRoom, setEditingRoom] = useState<Room | null>(null);
   const [staffBuildingIds, setStaffBuildingIds] = useState<number[]>([]);
 
-  const { data: allBuildings = [] } = useBuildings();
-  const { data: allRooms = [], isLoading: roomsLoading } = useRooms();
+  const { data: allBuildings = [] } = useBuildings(true);
+  const { data: allRooms = [], isLoading: roomsLoading } = useRooms(undefined, true);
 
   // Load staff's assigned buildings for RBAC on edit/delete
   useEffect(() => {
@@ -93,6 +93,8 @@ export function RoomsPage() {
         onAddClick={handleAddBuilding}
         userRole={user?.role}
         buildings={visibleBuildings}
+        rooms={Array.isArray(allRooms) ? allRooms : []}
+        dataEnabled={true}
         staffBuildingIds={staffBuildingIds}
       />
 

@@ -8,6 +8,12 @@ import { useAuth } from "../auth/AuthContext";
 import { getUserBuildingAssignments } from "../lib/api";
 import { ExactAvailabilityView } from "./components/ExactAvailabilityView";
 import type { Room } from "../lib/api";
+import {
+  formatDateLabelIST,
+  formatTimeHHMMIST,
+  getCurrentISTDateInputValue,
+  getMinutesFromISTDayStart,
+} from "../utils/datetime";
 import type { BookingRequestPrefill } from "./bookingAvailabilityBridge";
 
 type AvailabilityPageProps = {
@@ -17,32 +23,106 @@ type AvailabilityPageProps = {
   onRequestBooking?: (prefill: any) => void;
 };
 
+const AVAILABILITY_PREFERENCES_KEY = "qol.availability.preferences.v1";
+
+type AvailabilityPreferences = {
+  viewMode: "time" | "room" | "exact";
+  selectedBuildingId: number | null;
+  selectedRoomId: number | null;
+  selectedDate: string;
+  timeRangeStart: string;
+  timeRangeEnd: string;
+  selectedBuildingIdForRoomView: number | null;
+};
+
+function readAvailabilityPreferences(): AvailabilityPreferences {
+  const defaults: AvailabilityPreferences = {
+    viewMode: "time",
+    selectedBuildingId: null,
+    selectedRoomId: null,
+    selectedDate: getCurrentISTDateInputValue(),
+    timeRangeStart: "00:00",
+    timeRangeEnd: "23:59",
+    selectedBuildingIdForRoomView: null,
+  };
+
+  if (typeof window === "undefined") {
+    return defaults;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(AVAILABILITY_PREFERENCES_KEY);
+
+    if (!raw) {
+      return defaults;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<AvailabilityPreferences>;
+
+    return {
+      viewMode:
+        parsed.viewMode === "time" || parsed.viewMode === "room" || parsed.viewMode === "exact"
+          ? parsed.viewMode
+          : defaults.viewMode,
+      selectedBuildingId:
+        typeof parsed.selectedBuildingId === "number" && Number.isFinite(parsed.selectedBuildingId)
+          ? parsed.selectedBuildingId
+          : null,
+      selectedRoomId:
+        typeof parsed.selectedRoomId === "number" && Number.isFinite(parsed.selectedRoomId)
+          ? parsed.selectedRoomId
+          : null,
+      selectedDate:
+        typeof parsed.selectedDate === "string" && parsed.selectedDate.length > 0
+          ? parsed.selectedDate
+          : defaults.selectedDate,
+      timeRangeStart:
+        typeof parsed.timeRangeStart === "string" && parsed.timeRangeStart.length > 0
+          ? parsed.timeRangeStart
+          : defaults.timeRangeStart,
+      timeRangeEnd:
+        typeof parsed.timeRangeEnd === "string" && parsed.timeRangeEnd.length > 0
+          ? parsed.timeRangeEnd
+          : defaults.timeRangeEnd,
+      selectedBuildingIdForRoomView:
+        typeof parsed.selectedBuildingIdForRoomView === "number" && Number.isFinite(parsed.selectedBuildingIdForRoomView)
+          ? parsed.selectedBuildingIdForRoomView
+          : null,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
 export function AvailabilityPage({
   canRequestBooking: _canRequestBooking,
   prefill: _prefill,
   onPrefillApplied: _onPrefillApplied,
   onRequestBooking: _onRequestBooking,
 }: AvailabilityPageProps) {
+  const [initialPreferences] = useState<AvailabilityPreferences>(() =>
+    readAvailabilityPreferences(),
+  );
   const { user } = useAuth();
   const navigate = useNavigate();
   const isStaff = user?.role === "STAFF";
   const isAdmin = user?.role === "ADMIN";
   const canViewBookingsPage = isStaff || isAdmin;
 
-  const [viewMode, setViewMode] = useState<"time" | "room" | "exact">("time");
-  const [selectedBuildingId, setSelectedBuildingId] = useState<number | null>(null);
-  const [selectedRoomId, setSelectedRoomId] = useState<number | null>(null);
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [viewMode, setViewMode] = useState<"time" | "room" | "exact">(initialPreferences.viewMode);
+  const [selectedBuildingId, setSelectedBuildingId] = useState<number | null>(initialPreferences.selectedBuildingId);
+  const [selectedRoomId, setSelectedRoomId] = useState<number | null>(initialPreferences.selectedRoomId);
+  const [selectedDate, setSelectedDate] = useState(initialPreferences.selectedDate);
   const [selectedRoomIds, setSelectedRoomIds] = useState<number[]>([]);
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
   const [staffBuildingIds, setStaffBuildingIds] = useState<number[]>([]);
-  const [timeRangeStart, setTimeRangeStart] = useState("00:00");
-  const [timeRangeEnd, setTimeRangeEnd] = useState("23:59");
+  const [timeRangeStart, setTimeRangeStart] = useState(initialPreferences.timeRangeStart);
+  const [timeRangeEnd, setTimeRangeEnd] = useState(initialPreferences.timeRangeEnd);
   const [showRoomGrid, setShowRoomGrid] = useState(false);
-  const [selectedBuildingIdForRoomView, setSelectedBuildingIdForRoomView] = useState<number | null>(null);
+  const [selectedBuildingIdForRoomView, setSelectedBuildingIdForRoomView] = useState<number | null>(initialPreferences.selectedBuildingIdForRoomView);
   const [selectedRoomIdForRoomView, setSelectedRoomIdForRoomView] = useState<number | null>(null);
 
-  const { data: buildings = [] } = useBuildings();
+  const { data: buildings = [] } = useBuildings(true);
   const { data: allRooms = [] } = useRooms(undefined, true);
 
   // When building changes, reset room selection
@@ -67,6 +147,46 @@ export function AvailabilityPage({
 
     void loadStaffBuildings();
   }, [isStaff, user]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const payload: AvailabilityPreferences = {
+      viewMode,
+      selectedBuildingId,
+      selectedRoomId,
+      selectedDate,
+      timeRangeStart,
+      timeRangeEnd,
+      selectedBuildingIdForRoomView,
+    };
+
+    window.localStorage.setItem(AVAILABILITY_PREFERENCES_KEY, JSON.stringify(payload));
+  }, [
+    viewMode,
+    selectedBuildingId,
+    selectedRoomId,
+    selectedDate,
+    timeRangeStart,
+    timeRangeEnd,
+    selectedBuildingIdForRoomView,
+  ]);
+
+  const resetViewPreferences = () => {
+    setViewMode("time");
+    setSelectedBuildingId(null);
+    setSelectedRoomId(null);
+    setSelectedDate(getCurrentISTDateInputValue());
+    setSelectedRoomIds([]);
+    setSelectedDates([]);
+    setTimeRangeStart("00:00");
+    setTimeRangeEnd("23:59");
+    setShowRoomGrid(false);
+    setSelectedBuildingIdForRoomView(null);
+    setSelectedRoomIdForRoomView(null);
+  };
 
   // Get selected room with building info
   const selectedRoom: (Room & { buildingName?: string }) | null = selectedRoomId
@@ -151,6 +271,12 @@ export function AvailabilityPage({
             }`}
           >
             Exact Availability
+          </button>
+          <button
+            onClick={resetViewPreferences}
+            className="px-4 py-2 rounded-lg font-medium transition-colors bg-gray-100 text-gray-700 hover:bg-gray-200"
+          >
+            Reset View
           </button>
         </div>
       </div>
@@ -327,7 +453,7 @@ export function AvailabilityPage({
               className="btn btn-primary btn-sm"
               title="Load grid"
             >
-              ↓
+              Load Grid
             </button>
           </div>
         </div>
@@ -447,7 +573,7 @@ export function AvailabilityPage({
                   </label>
                   <input
                     type="date"
-                    value={selectedDates[0] || new Date().toISOString().split('T')[0]}
+                    value={selectedDates[0] || getCurrentISTDateInputValue()}
                     onChange={(e) => {
                       setSelectedDates([e.target.value]);
                     }}
@@ -489,6 +615,7 @@ export function AvailabilityPage({
             selectedDates={selectedDates}
             timeRangeStart={timeRangeStart}
             timeRangeEnd={timeRangeEnd}
+            buildings={buildings}
           />
         </div>
       )}
@@ -632,13 +759,8 @@ function RoomRow({
   const rangeEndMinutes = endHour * 60 + endMin;
 
   // Step 1: Normalize time
-  const getMinutesFromDayStart = (isoString: string, dayDate: string): number => {
-    const segmentDate = new Date(isoString);
-    const dayStart = new Date(dayDate);
-    dayStart.setUTCHours(0, 0, 0, 0);
-    const diffMs = segmentDate.getTime() - dayStart.getTime();
-    return Math.round(diffMs / (1000 * 60));
-  };
+  const getMinutesFromDayStart = (isoString: string, dayDate: string): number =>
+    getMinutesFromISTDayStart(isoString, dayDate);
 
   // Step 2: Compute layout metrics
   const getSegmentWidth = (startMin: number, endMin: number): number => {
@@ -658,12 +780,7 @@ function RoomRow({
     return (positionInRange / totalDuration) * 100;
   };
 
-  const formatTime = (isoString: string): string => {
-    const dateObj = new Date(isoString);
-    const h = dateObj.getUTCHours().toString().padStart(2, '0');
-    const m = dateObj.getUTCMinutes().toString().padStart(2, '0');
-    return `${h}:${m}`;
-  };
+  const formatTime = (isoString: string): string => formatTimeHHMMIST(isoString);
 
   const renderSegments = () => {
     if (error) {
@@ -883,7 +1000,7 @@ function AvailabilityGrid({
         <div className="p-3 flex items-center">
           <input
             type="date"
-            value={dates[dates.length - 1] || new Date().toISOString().split('T')[0]}
+            value={dates[dates.length - 1] || getCurrentISTDateInputValue()}
             onChange={(e) => {
               onSelectDate(e.target.value);
             }}
@@ -925,13 +1042,7 @@ function DateRow({
   const rangeStartMinutes = startHour * 60 + startMin;
   const rangeEndMinutes = endHour * 60 + endMin;
 
-  const formatDate = (dateStr: string) => {
-    const dateObj = new Date(dateStr);
-    const weekday = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
-    const month = dateObj.toLocaleDateString('en-US', { month: 'short' });
-    const day = dateObj.getDate();
-    return `${day} ${month}, ${weekday}`;
-  };
+  const formatDate = (dateStr: string) => formatDateLabelIST(dateStr);
 
   // Get error status code
   const errorStatus = (error as any)?.response?.status;
@@ -943,13 +1054,8 @@ function DateRow({
     : null;
 
   // Step 1: Normalize time - Convert ISO timestamp to minutes from day start
-  const getMinutesFromDayStart = (isoString: string, dayDate: string): number => {
-    const segmentDate = new Date(isoString);
-    const dayStart = new Date(dayDate);
-    dayStart.setUTCHours(0, 0, 0, 0);
-    const diffMs = segmentDate.getTime() - dayStart.getTime();
-    return Math.round(diffMs / (1000 * 60)); // Convert to minutes
-  };
+  const getMinutesFromDayStart = (isoString: string, dayDate: string): number =>
+    getMinutesFromISTDayStart(isoString, dayDate);
 
   // Step 2: Compute layout metrics - Convert duration to percentage based on time range
   const getSegmentWidth = (startMin: number, endMin: number): number => {
@@ -972,12 +1078,7 @@ function DateRow({
   };
 
   // Helper function to format time for tooltips
-  const formatTime = (isoString: string): string => {
-    const dateObj = new Date(isoString);
-    const h = dateObj.getUTCHours().toString().padStart(2, '0');
-    const m = dateObj.getUTCMinutes().toString().padStart(2, '0');
-    return `${h}:${m}`;
-  };
+  const formatTime = (isoString: string): string => formatTimeHHMMIST(isoString);
 
   // Step 4: Render segments with absolute positioning and percentage coordinates
   const renderSegments = () => {

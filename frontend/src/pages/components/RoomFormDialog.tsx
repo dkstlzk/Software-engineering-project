@@ -313,7 +313,7 @@ export function RoomFormDialog({
             </div>
             {!accessible && (
               <p className="text-sm text-amber-600">
-                ⚠ This room will not accept new booking requests while unavailable.
+                Warning: This room will not accept new booking requests while unavailable.
               </p>
             )}
           </div>

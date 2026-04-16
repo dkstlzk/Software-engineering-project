@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import {
@@ -30,6 +30,7 @@ import {
   Info,
 } from "lucide-react";
 import { formatError } from "../utils/formatError";
+import { formatDateDDMMYYYY, formatTimeHHMMIST } from "../utils/datetime";
 
 export default function DashboardPage() {
   const { user } = useAuth();
@@ -43,6 +44,11 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
 
   const canManageRooms = user?.role === "ADMIN" || user?.role === "STAFF";
+  const role = user?.role;
+  const isAdmin = role === "ADMIN";
+  const isStaff = role === "STAFF";
+  const isStudent = role === "STUDENT";
+  const isFaculty = role === "FACULTY";
 
   // Load dashboard data
   useEffect(() => {
@@ -84,17 +90,11 @@ export default function DashboardPage() {
   };
 
   const formatTime = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return formatTimeHHMMIST(dateString);
   };
 
   const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString([], {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
+    return formatDateDDMMYYYY(dateString);
   };
 
   const formatActivityTime = (dateString: string) => {
@@ -110,7 +110,7 @@ export default function DashboardPage() {
     if (diffHours < 24) return `${diffHours}h ago`;
     if (diffDays < 7) return `${diffDays}d ago`;
 
-    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+    return formatDateDDMMYYYY(date);
   };
 
   const getActivityIcon = (status: string) => {
@@ -136,6 +136,177 @@ export default function DashboardPage() {
     return statusMap[status] || status;
   };
 
+  const welcomeText = isAdmin
+    ? `Welcome back, ${user?.name}! Here's an overview of all bookings across campus.`
+    : isStaff
+      ? `Welcome back, ${user?.name}! Here's an overview for your assigned buildings.`
+      : `Welcome back, ${user?.name}! Here's an overview of your bookings.`;
+
+  const upcomingTitle = isAdmin
+    ? "Upcoming Bookings"
+    : isStaff
+      ? "Upcoming Bookings in Your Assigned Buildings"
+      : "Your Upcoming Bookings";
+
+  const upcomingDescription = isAdmin
+    ? "Next 5 confirmed bookings"
+    : isStaff
+      ? "Next 5 bookings in your assigned buildings"
+      : "Your next 5 incoming bookings";
+
+  const noUpcomingText = isAdmin
+    ? "No upcoming bookings scheduled"
+    : isStaff
+      ? "No upcoming bookings in your assigned buildings"
+      : "You have no upcoming bookings scheduled";
+
+  const activityTitle = isAdmin
+    ? "Recent Activity"
+    : isStaff
+      ? "Recent Actions in Your Assigned Buildings"
+      : "Your Recent Actions";
+
+  const activityDescription = isAdmin
+    ? "Last 10 actions"
+    : isStaff
+      ? "Last 10 actions in your assigned buildings"
+      : "Your last 10 recent actions";
+
+  const noActivityText = isAdmin
+    ? "No recent activities"
+    : isStaff
+      ? "No recent actions in your assigned buildings"
+      : "You have no recent actions";
+
+  const statsCards: Array<{
+    key: string;
+    title: string;
+    value: number;
+    description: string;
+    icon: ReactElement;
+  }> = (() => {
+    if (isAdmin) {
+      return [
+        {
+          key: "admin-total-bookings",
+          title: "Total Bookings",
+          value: stats?.totalBookingsThisMonth || 0,
+          description: "This month",
+          icon: <Calendar className="w-8 h-8 text-blue-500 opacity-20" />,
+        },
+        {
+          key: "admin-pending",
+          title: "Pending Requests",
+          value: stats?.pendingRequests || 0,
+          description: "Needs action",
+          icon: <AlertCircle className="w-8 h-8 text-yellow-500 opacity-20" />,
+        },
+        {
+          key: "admin-utilization",
+          title: "Room Utilization",
+          value: stats?.roomUtilization || 0,
+          description: "Today (%)",
+          icon: <TrendingUp className="w-8 h-8 text-green-500 opacity-20" />,
+        },
+        {
+          key: "admin-active-users",
+          title: "Active Users",
+          value: stats?.activeUsers || 0,
+          description: "Last 30 days",
+          icon: <Users className="w-8 h-8 text-purple-500 opacity-20" />,
+        },
+      ];
+    }
+
+    if (isStaff) {
+      return [
+        {
+          key: "staff-total-bookings",
+          title: "Bookings in Your Assigned Buildings",
+          value: stats?.totalBookingsThisMonth || 0,
+          description: "Accepted this month",
+          icon: <Calendar className="w-8 h-8 text-blue-500 opacity-20" />,
+        },
+        {
+          key: "staff-pending",
+          title: "Pending in Your Assigned Buildings",
+          value: stats?.pendingRequests || 0,
+          description: "Requests awaiting staff approval",
+          icon: <AlertCircle className="w-8 h-8 text-yellow-500 opacity-20" />,
+        },
+      ];
+    }
+
+    if (isStudent) {
+      return [
+        {
+          key: "student-total-bookings",
+          title: "Your Accepted Bookings",
+          value: stats?.totalBookingsThisMonth || 0,
+          description: "Accepted this month",
+          icon: <Calendar className="w-8 h-8 text-blue-500 opacity-20" />,
+        },
+        {
+          key: "student-pending-faculty",
+          title: "Your Pending Faculty Approvals",
+          value: stats?.pendingRequestsByFaculty || 0,
+          description: "Your requests waiting for faculty",
+          icon: <AlertCircle className="w-8 h-8 text-orange-500 opacity-20" />,
+        },
+        {
+          key: "student-pending-staff",
+          title: "Your Pending Staff Approvals",
+          value: stats?.pendingRequestsByStaff || 0,
+          description: "Your requests waiting for staff",
+          icon: <AlertCircle className="w-8 h-8 text-yellow-500 opacity-20" />,
+        },
+      ];
+    }
+
+    if (isFaculty) {
+      return [
+        {
+          key: "faculty-total-bookings",
+          title: "Your Accepted Bookings",
+          value: stats?.totalBookingsThisMonth || 0,
+          description: "Accepted this month",
+          icon: <Calendar className="w-8 h-8 text-blue-500 opacity-20" />,
+        },
+        {
+          key: "faculty-pending-own",
+          title: "Your Pending Requests",
+          value: stats?.pendingRequests || 0,
+          description: "Requests made by you awaiting approval",
+          icon: <AlertCircle className="w-8 h-8 text-yellow-500 opacity-20" />,
+        },
+        {
+          key: "faculty-pending-clear",
+          title: "Requests Waiting for Your Approval",
+          value: stats?.pendingRequestsToClear || 0,
+          description: "Pending requests you need to clear",
+          icon: <Activity className="w-8 h-8 text-indigo-500 opacity-20" />,
+        },
+      ];
+    }
+
+    return [
+      {
+        key: "fallback-total-bookings",
+        title: "Your Accepted Bookings",
+        value: stats?.totalBookingsThisMonth || 0,
+        description: "Accepted this month",
+        icon: <Calendar className="w-8 h-8 text-blue-500 opacity-20" />,
+      },
+      {
+        key: "fallback-pending",
+        title: "Your Pending Requests",
+        value: stats?.pendingRequests || 0,
+        description: "Awaiting review",
+        icon: <AlertCircle className="w-8 h-8 text-yellow-500 opacity-20" />,
+      },
+    ];
+  })();
+
   if (loading) {
     return (
       <div className="p-6 space-y-6">
@@ -160,9 +331,7 @@ export default function DashboardPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold">Dashboard</h1>
-          <p className="text-gray-500 mt-1">
-            Welcome back, {user?.name}! Here's an overview of your bookings.
-          </p>
+          <p className="text-gray-500 mt-1">{welcomeText}</p>
         </div>
       </div>
 
@@ -174,80 +343,33 @@ export default function DashboardPage() {
       )}
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        {/* Total Bookings This Month */}
-        <Card className="hover:shadow-md transition-shadow">
-          <CardContent className="pt-6">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm font-medium text-muted-foreground">
-                  Total Bookings
-                </p>
-                <p className="text-2xl font-bold mt-2">
-                  {stats?.totalBookingsThisMonth || 0}
-                </p>
-                <p className="text-xs text-muted-foreground mt-2">This month</p>
+      <div
+        className={`grid gap-6 ${
+          isAdmin
+            ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
+            : isStaff
+              ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-2"
+              : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
+        }`}
+      >
+        {statsCards.map((card) => (
+          <Card key={card.key} className="hover:shadow-md transition-shadow">
+            <CardContent className="pt-6">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">
+                    {card.title}
+                  </p>
+                  <p className="text-2xl font-bold mt-2">{card.value}</p>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    {card.description}
+                  </p>
+                </div>
+                {card.icon}
               </div>
-              <Calendar className="w-8 h-8 text-blue-500 opacity-20" />
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Pending Requests */}
-        <Card className="hover:shadow-md transition-shadow">
-          <CardContent className="pt-6">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm font-medium text-muted-foreground">
-                  Pending Requests
-                </p>
-                <p className="text-2xl font-bold mt-2">
-                  {stats?.pendingRequests || 0}
-                </p>
-                <p className="text-xs text-muted-foreground mt-2">
-                  Needs action
-                </p>
-              </div>
-              <AlertCircle className="w-8 h-8 text-yellow-500 opacity-20" />
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Room Utilization */}
-        <Card className="hover:shadow-md transition-shadow">
-          <CardContent className="pt-6">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm font-medium text-muted-foreground">
-                  Room Utilization
-                </p>
-                <p className="text-2xl font-bold mt-2">
-                  {stats?.roomUtilization || 0}%
-                </p>
-                <p className="text-xs text-muted-foreground mt-2">Today</p>
-              </div>
-              <TrendingUp className="w-8 h-8 text-green-500 opacity-20" />
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Active Users */}
-        <Card className="hover:shadow-md transition-shadow">
-          <CardContent className="pt-6">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm font-medium text-muted-foreground">
-                  Active Users
-                </p>
-                <p className="text-2xl font-bold mt-2">
-                  {stats?.activeUsers || 0}
-                </p>
-                <p className="text-xs text-muted-foreground mt-2">Last 30 days</p>
-              </div>
-              <Users className="w-8 h-8 text-purple-500 opacity-20" />
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        ))}
       </div>
 
       {/* Quick Actions */}
@@ -297,17 +419,15 @@ export default function DashboardPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Clock className="w-5 h-5" />
-              Upcoming Bookings
+              {upcomingTitle}
             </CardTitle>
-            <CardDescription>Next 5 confirmed bookings</CardDescription>
+            <CardDescription>{upcomingDescription}</CardDescription>
           </CardHeader>
           <CardContent>
             {upcomingBookings.length === 0 ? (
               <div className="text-center py-8">
                 <Calendar className="w-12 h-12 text-muted-foreground mx-auto opacity-30 mb-3" />
-                <p className="text-muted-foreground">
-                  No upcoming bookings scheduled
-                </p>
+                <p className="text-muted-foreground">{noUpcomingText}</p>
               </div>
             ) : (
               <div className="space-y-4">
@@ -355,17 +475,15 @@ export default function DashboardPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Activity className="w-5 h-5" />
-              Recent Activity
+              {activityTitle}
             </CardTitle>
-            <CardDescription>Last 10 actions</CardDescription>
+            <CardDescription>{activityDescription}</CardDescription>
           </CardHeader>
           <CardContent>
             {activities.length === 0 ? (
               <div className="text-center py-8">
                 <Activity className="w-12 h-12 text-muted-foreground mx-auto opacity-30 mb-3" />
-                <p className="text-muted-foreground text-sm">
-                  No recent activities
-                </p>
+                <p className="text-muted-foreground text-sm">{noActivityText}</p>
               </div>
             ) : (
               <div className="space-y-3 max-h-96 overflow-y-auto">

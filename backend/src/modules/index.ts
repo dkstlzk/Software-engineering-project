@@ -5,6 +5,7 @@ import { bookingRequestsModule } from "./bookingRequests";
 import { bookingEditRequestsModule } from "./bookingEditRequests";
 import { bookingsModule } from "./bookings";
 import { buildingsModule } from "./buildings";
+import { holidaysModule } from "./holidays";
 import { dashboardModule } from "./dashboard";
 import { notificationsModule } from "./notifications";
 import { roomsModule } from "./rooms";
@@ -18,6 +19,7 @@ import { usersModule } from "./users";
 export const apiModules: ApiModule[] = [
   authModule,
   buildingsModule,
+  holidaysModule,
   roomsModule,
   bookingsModule,
   bookingRequestsModule,

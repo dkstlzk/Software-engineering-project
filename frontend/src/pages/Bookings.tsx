@@ -14,6 +14,71 @@ import type { BookingRequestPrefill } from "./bookingAvailabilityBridge";
 import { EditBookingModal } from "../components/EditBookingModal";
 import { useToast } from "../context/ToastContext";
 import { formatError } from "../utils/formatError";
+import { buildHolidayWarningPrompt, isHolidayWarningError } from "../utils/holidayWarning";
+
+const BOOKING_FILTERS_STORAGE_KEY = "qol.bookings.filters.v1";
+const RECENT_BOOKINGS_PAST_DAYS = 14;
+const RECENT_BOOKINGS_FUTURE_DAYS = 21;
+const RECENT_BOOKINGS_LIMIT = 75;
+
+type PersistedBookingFilters = {
+  filterRoomId: number | null;
+  filterBuildingId: number | null;
+  filterStartAt: string;
+  filterEndAt: string;
+};
+
+const DEFAULT_PERSISTED_BOOKING_FILTERS: PersistedBookingFilters = {
+  filterRoomId: null,
+  filterBuildingId: null,
+  filterStartAt: "",
+  filterEndAt: "",
+};
+
+function readPersistedBookingFilters(): PersistedBookingFilters {
+  if (typeof window === "undefined") {
+    return DEFAULT_PERSISTED_BOOKING_FILTERS;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(BOOKING_FILTERS_STORAGE_KEY);
+
+    if (!raw) {
+      return DEFAULT_PERSISTED_BOOKING_FILTERS;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PersistedBookingFilters>;
+
+    return {
+      filterRoomId:
+        typeof parsed.filterRoomId === "number" && Number.isFinite(parsed.filterRoomId)
+          ? parsed.filterRoomId
+          : null,
+      filterBuildingId:
+        typeof parsed.filterBuildingId === "number" && Number.isFinite(parsed.filterBuildingId)
+          ? parsed.filterBuildingId
+          : null,
+      filterStartAt: typeof parsed.filterStartAt === "string" ? parsed.filterStartAt : "",
+      filterEndAt: typeof parsed.filterEndAt === "string" ? parsed.filterEndAt : "",
+    };
+  } catch {
+    return DEFAULT_PERSISTED_BOOKING_FILTERS;
+  }
+}
+
+function getRecentBookingsWindow(): { startAt: string; endAt: string } {
+  const now = new Date();
+  const startAt = new Date(now);
+  startAt.setDate(startAt.getDate() - RECENT_BOOKINGS_PAST_DAYS);
+
+  const endAt = new Date(now);
+  endAt.setDate(endAt.getDate() + RECENT_BOOKINGS_FUTURE_DAYS);
+
+  return {
+    startAt: startAt.toISOString(),
+    endAt: endAt.toISOString(),
+  };
+}
 
 export function BookingsPage() {
   const { user } = useAuth();
@@ -47,12 +112,15 @@ type BookingsPageContentProps = {
 };
 
 function BookingsPageContent({ currentUserId, userRole, isAdmin, canManageBookings, locationPrefill, pushToast }: BookingsPageContentProps) {
+  const persistedFilters = readPersistedBookingFilters();
+  const [hasRequestedFullData, setHasRequestedFullData] = useState(false);
+  const [recentWindow] = useState(() => getRecentBookingsWindow());
 
   // Filters
-  const [filterRoomId, setFilterRoomId] = useState<number | "">("");
-  const [filterBuildingId, setFilterBuildingId] = useState<number | "">("");
-  const [filterStartAt, setFilterStartAt] = useState("");
-  const [filterEndAt, setFilterEndAt] = useState("");
+  const [filterRoomId, setFilterRoomId] = useState<number | "">(persistedFilters.filterRoomId ?? "");
+  const [filterBuildingId, setFilterBuildingId] = useState<number | "">(persistedFilters.filterBuildingId ?? "");
+  const [filterStartAt, setFilterStartAt] = useState(persistedFilters.filterStartAt);
+  const [filterEndAt, setFilterEndAt] = useState(persistedFilters.filterEndAt);
 
   // Create form
   const [newRoomId, setNewRoomId] = useState<number | "">(""); 
@@ -80,12 +148,39 @@ function BookingsPageContent({ currentUserId, userRole, isAdmin, canManageBookin
     return Object.keys(f).length > 0 ? f : undefined;
   }, [filterRoomId, filterBuildingId, filterStartAt, filterEndAt]);
 
+  const hasActiveFilters =
+    filterRoomId !== "" ||
+    filterBuildingId !== "" ||
+    filterStartAt.length > 0 ||
+    filterEndAt.length > 0;
+
+  const isRecentPreviewMode =
+    !hasRequestedFullData &&
+    !hasActiveFilters;
+
+  const bookingQueryFilters = useMemo(() => {
+    if (filters) {
+      return filters;
+    }
+
+    if (isRecentPreviewMode) {
+      return {
+        startAt: recentWindow.startAt,
+        endAt: recentWindow.endAt,
+        limit: RECENT_BOOKINGS_LIMIT,
+      };
+    }
+
+    return undefined;
+  }, [filters, isRecentPreviewMode, recentWindow.endAt, recentWindow.startAt]);
+
   // Queries
-  const { data: bookings = [], isLoading, error: bookingsError } = useBookings(filters);
-  const { data: rooms = [] } = useRooms();
-  const { data: buildings = [] } = useBuildings();
+  const { data: bookings = [], isLoading, error: bookingsError } = useBookings(bookingQueryFilters, true);
+  const { data: rooms = [] } = useRooms(undefined, true);
+  const { data: buildings = [] } = useBuildings(true);
   const { data: managedUsersResponse } = useManagedUsers(
-    isAdmin ? { page: 1, limit: 100 } : undefined
+    isAdmin ? { page: 1, limit: 100 } : undefined,
+    isAdmin,
   );
 
   // Build admin user name map
@@ -152,6 +247,21 @@ function BookingsPageContent({ currentUserId, userRole, isAdmin, canManageBookin
     };
   }, [userRole]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const payload: PersistedBookingFilters = {
+      filterRoomId: filterRoomId === "" ? null : filterRoomId,
+      filterBuildingId: filterBuildingId === "" ? null : filterBuildingId,
+      filterStartAt,
+      filterEndAt,
+    };
+
+    window.localStorage.setItem(BOOKING_FILTERS_STORAGE_KEY, JSON.stringify(payload));
+  }, [filterRoomId, filterBuildingId, filterStartAt, filterEndAt]);
+
   // Apply prefill from location state if available
   useEffect(() => {
     if (!locationPrefill) {
@@ -177,11 +287,31 @@ function BookingsPageContent({ currentUserId, userRole, isAdmin, canManageBookin
 
     setCreateError(null);
     try {
-      await createBookingMutation.mutateAsync({ 
-        roomId: newRoomId, 
-        startAt: newStartAt, 
-        endAt: newEndAt 
-      });
+      const basePayload = {
+        roomId: newRoomId,
+        startAt: newStartAt,
+        endAt: newEndAt,
+      };
+
+      try {
+        await createBookingMutation.mutateAsync(basePayload);
+      } catch (error) {
+        if (!isHolidayWarningError(error)) {
+          throw error;
+        }
+
+        const continueAnyway = window.confirm(buildHolidayWarningPrompt(error));
+
+        if (!continueAnyway) {
+          return;
+        }
+
+        await createBookingMutation.mutateAsync({
+          ...basePayload,
+          overrideHolidayWarning: true,
+        });
+      }
+
       setNewRoomId("");
       setNewStartAt("");
       setNewEndAt("");
@@ -267,9 +397,15 @@ function BookingsPageContent({ currentUserId, userRole, isAdmin, canManageBookin
     }
   };
 
+  const clearFilters = () => {
+    setFilterRoomId("");
+    setFilterBuildingId("");
+    setFilterStartAt("");
+    setFilterEndAt("");
+  };
+
   const error = bookingsError || createBookingMutation.error || deleteBookingMutation.error;
   const isSubmitting = createBookingMutation.isPending;
-
   return (
     <section>
       <div className="page-header">
@@ -277,10 +413,49 @@ function BookingsPageContent({ currentUserId, userRole, isAdmin, canManageBookin
         <p>View and manage confirmed room bookings</p>
       </div>
 
+      {isRecentPreviewMode && (
+        <div className="alert">
+          Showing recent bookings from the last {RECENT_BOOKINGS_PAST_DAYS} days through the next {RECENT_BOOKINGS_FUTURE_DAYS} days (up to {RECENT_BOOKINGS_LIMIT} rows). Apply filters or load more for full history.
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            style={{ marginLeft: "var(--space-2)" }}
+            onClick={() => setHasRequestedFullData(true)}
+          >
+            Load More Bookings
+          </button>
+        </div>
+      )}
+
+      {!isRecentPreviewMode &&
+        !hasActiveFilters &&
+        hasRequestedFullData && (
+          <div className="alert">
+            Showing full booking history.
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: "var(--space-2)" }}
+              onClick={() => setHasRequestedFullData(false)}
+            >
+              Switch To Recent View
+            </button>
+          </div>
+        )}
+
       {/* Filter */}
       <form className="card section-gap" onSubmit={(e) => { e.preventDefault(); }}>
         <div className="card-header">
           <h3>Filters</h3>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={clearFilters}
+            disabled={!hasActiveFilters}
+            style={{ marginLeft: "auto" }}
+          >
+            Clear Filters
+          </button>
         </div>
         <div className="form-row">
           <div className="form-field">

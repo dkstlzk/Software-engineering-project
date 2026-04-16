@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Check } from "lucide-react";
 import type { Building } from "../../lib/api";
 
@@ -12,90 +13,148 @@ export function BuildingSelector({
   selectedBuildingIds,
   onSelectionChange,
 }: BuildingSelectorProps) {
+  const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState(false);
   const sortedBuildings = [...buildings].sort((a, b) => a.name.localeCompare(b.name));
+  const normalizedSearch = search.trim().toLowerCase();
+
+  const visibleBuildings = normalizedSearch
+    ? sortedBuildings.filter((building) =>
+        `${building.name} ${building.location ?? ""}`
+          .toLowerCase()
+          .includes(normalizedSearch),
+      )
+    : sortedBuildings;
+
+  const selectedSet = new Set(selectedBuildingIds);
+  const isAllSelected = selectedBuildingIds.length === buildings.length && buildings.length > 0;
+  const denseVisibleLimit = normalizedSearch ? visibleBuildings.length : 12;
+  const hasMoreThanDenseLimit = visibleBuildings.length > denseVisibleLimit;
+  const displayBuildings =
+    expanded || !hasMoreThanDenseLimit
+      ? visibleBuildings
+      : visibleBuildings.slice(0, denseVisibleLimit);
+
+  const selectedLabels = sortedBuildings
+    .filter((building) => selectedSet.has(building.id))
+    .map((building) => building.name);
+
+  const selectedSummary =
+    selectedLabels.length === 0
+      ? "No buildings selected"
+      : selectedLabels.length <= 2
+        ? selectedLabels.join(", ")
+        : `${selectedLabels[0]}, ${selectedLabels[1]} +${selectedLabels.length - 2} more`;
 
   const handleSelectAll = () => {
-    if (selectedBuildingIds.length === buildings.length) {
-      // If all are selected, deselect all
+    if (isAllSelected) {
       onSelectionChange([]);
-    } else {
-      // Select all
-      onSelectionChange(buildings.map((b) => b.id));
+      return;
     }
+
+    onSelectionChange(buildings.map((building) => building.id));
+  };
+
+  const handleClearSelection = () => {
+    onSelectionChange([]);
   };
 
   const handleToggleBuilding = (buildingId: number) => {
-    if (selectedBuildingIds.includes(buildingId)) {
+    if (selectedSet.has(buildingId)) {
       onSelectionChange(selectedBuildingIds.filter((id) => id !== buildingId));
-    } else {
-      onSelectionChange([...selectedBuildingIds, buildingId]);
+      return;
     }
+
+    onSelectionChange([...selectedBuildingIds, buildingId]);
   };
 
-  const isAllSelected = selectedBuildingIds.length === buildings.length && buildings.length > 0;
-  const isPartiallySelected = selectedBuildingIds.length > 0 && !isAllSelected;
-
   return (
-    <div className="space-y-3">
-      {/* Select All Option */}
-      <div className="border border-gray-300 rounded-lg p-3 hover:bg-gray-50 transition-colors">
-        <button
-          onClick={handleSelectAll}
-          className="flex items-center gap-3 w-full text-left"
-        >
-          <div className="relative w-5 h-5 border-2 border-blue-500 rounded flex items-center justify-center flex-shrink-0">
-            {isAllSelected || isPartiallySelected ? (
-              <Check size={16} className="text-blue-500" strokeWidth={3} />
-            ) : null}
-          </div>
-          <span className="font-semibold text-gray-900">All Buildings</span>
-        </button>
-      </div>
-
-      {/* Individual Building Options */}
-      <div className="space-y-2">
-        {sortedBuildings.map((building) => {
-          const isSelected = selectedBuildingIds.includes(building.id);
-          return (
-            <div
-              key={building.id}
-              className={`border rounded-lg p-3 transition-all ${
-                isSelected
-                  ? "border-blue-500 bg-blue-50"
-                  : "border-gray-300 hover:border-gray-400 hover:bg-gray-50"
-              }`}
+    <div className="space-y-2 rounded-md border border-slate-200 bg-white p-3">
+      <div className="flex items-center justify-between gap-2 text-xs text-slate-600">
+        <span className="truncate" title={selectedSummary}>
+          {selectedBuildingIds.length}/{buildings.length} selected · {selectedSummary}
+        </span>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={handleSelectAll}
+            className="rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+          >
+            {isAllSelected ? "Deselect all" : "Select all"}
+          </button>
+          {selectedBuildingIds.length > 0 && (
+            <button
+              type="button"
+              onClick={handleClearSelection}
+              className="rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
             >
-              <button
-                onClick={() => handleToggleBuilding(building.id)}
-                className="flex items-center gap-3 w-full text-left"
-              >
-                <div
-                  className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${
-                    isSelected
-                      ? "border-blue-500 bg-blue-500"
-                      : "border-gray-400"
-                  }`}
-                >
-                  {isSelected ? <Check size={16} className="text-white" strokeWidth={3} /> : null}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h4 className="font-medium text-gray-900 truncate">{building.name}</h4>
-                  {building.location && (
-                    <p className="text-xs text-gray-500 truncate">{building.location}</p>
-                  )}
-                </div>
-              </button>
-            </div>
-          );
-        })}
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Selected Count */}
-      {selectedBuildingIds.length > 0 && (
-        <div className="text-sm text-gray-600 pt-2">
-          <span className="font-medium">{selectedBuildingIds.length}</span> of{" "}
-          <span className="font-medium">{buildings.length}</span> buildings selected
+      {buildings.length > 8 && (
+        <input
+          type="text"
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value);
+            if (expanded) {
+              setExpanded(false);
+            }
+          }}
+          placeholder="Search buildings"
+          className="h-8 w-full rounded border border-slate-300 px-2 text-xs focus:outline-none focus:ring-1 focus:ring-slate-400"
+        />
+      )}
+
+      <div className="max-h-40 overflow-y-auto pr-1">
+        <div className="flex flex-wrap gap-1.5">
+          {displayBuildings.map((building) => {
+            const isSelected = selectedSet.has(building.id);
+            const chipTitle = building.location
+              ? `${building.name} - ${building.location}`
+              : building.name;
+
+            return (
+              <button
+                type="button"
+                key={building.id}
+                onClick={() => handleToggleBuilding(building.id)}
+                title={chipTitle}
+                className={`inline-flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors ${
+                  isSelected
+                    ? "border-slate-500 bg-slate-100 text-slate-900"
+                    : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+                }`}
+              >
+                {isSelected ? <Check size={12} strokeWidth={3} className="shrink-0" /> : null}
+                <span className="truncate">{building.name}</span>
+              </button>
+            );
+          })}
+
+          {displayBuildings.length === 0 && (
+            <div className="text-xs text-slate-500">No buildings match your search.</div>
+          )}
         </div>
+      </div>
+
+      {hasMoreThanDenseLimit && (
+        <button
+          type="button"
+          onClick={() => setExpanded((current) => !current)}
+          className="text-xs font-medium text-slate-600 hover:text-slate-900"
+        >
+          {expanded
+            ? "Show less"
+            : `Show ${visibleBuildings.length - denseVisibleLimit} more`}
+        </button>
+      )}
+
+      {normalizedSearch && selectedBuildingIds.length > 0 && (
+        <div className="text-xs text-slate-500">Selected items remain active even when filtered.</div>
       )}
     </div>
   );

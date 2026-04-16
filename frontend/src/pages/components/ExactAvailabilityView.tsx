@@ -7,13 +7,14 @@ import { useBuildings } from "../../hooks/useBuildings";
 import { useAvailability } from "../../hooks/useAvailability";
 import { useAuth } from "../../auth/AuthContext";
 import { getUserBuildingAssignments } from "../../lib/api";
-import type { AvailabilityRoom } from "../../lib/api";
+import type { AvailabilityRoom, Building } from "../../lib/api";
 import type { BookingRequestPrefill } from "../bookingAvailabilityBridge";
 
 type ExactAvailabilityViewProps = {
   selectedDates: string[];
   timeRangeStart: string;
   timeRangeEnd: string;
+  buildings?: Building[];
 };
 
 interface RoomWithBuilding extends AvailabilityRoom {
@@ -25,6 +26,7 @@ export function ExactAvailabilityView({
   selectedDates,
   timeRangeStart,
   timeRangeEnd,
+  buildings: providedBuildings,
 }: ExactAvailabilityViewProps) {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -37,7 +39,9 @@ export function ExactAvailabilityView({
   const [error, setError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
 
-  const { data: buildings = [] } = useBuildings();
+  const shouldFetchBuildings = providedBuildings === undefined;
+  const { data: fetchedBuildings = [] } = useBuildings(shouldFetchBuildings);
+  const buildings = providedBuildings ?? fetchedBuildings;
 
   // Build the start and end datetime for the availability API
   const selectedDate = selectedDates[0] || "";
@@ -156,21 +160,22 @@ export function ExactAvailabilityView({
             Choose buildings to see room availability
           </p>
         </div>
-        <div className="p-6 space-y-4">
+        <div className="p-4 space-y-3">
           <BuildingSelector
             buildings={visibleBuildings}
             selectedBuildingIds={selectedBuildingIds}
             onSelectionChange={setSelectedBuildingIds}
           />
-          
-          {/* Proceed Button */}
-          <button
-            onClick={handleProceedSearch}
-            disabled={selectedBuildingIds.length === 0 || selectedDates.length === 0}
-            className="w-full mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-          >
-            Search Availability
-          </button>
+
+          <div className="flex justify-end">
+            <button
+              onClick={handleProceedSearch}
+              disabled={selectedBuildingIds.length === 0 || selectedDates.length === 0}
+              className="px-3 py-1.5 text-sm bg-blue-500 text-white rounded-md font-medium hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+            >
+              Search Availability
+            </button>
+          </div>
         </div>
       </div>
 

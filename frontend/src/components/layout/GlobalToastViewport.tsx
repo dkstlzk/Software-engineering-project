@@ -25,22 +25,22 @@ function getToastStyle(type: ToastType): { container: string; icon: string } {
   switch (type) {
     case 'success':
       return {
-        container: 'border-emerald-200 bg-emerald-50/95 text-emerald-900',
+        container: 'border-slate-200 bg-white text-slate-900',
         icon: 'text-emerald-600',
       };
     case 'error':
       return {
-        container: 'border-red-200 bg-red-50/95 text-red-900',
+        container: 'border-slate-200 bg-white text-slate-900',
         icon: 'text-red-600',
       };
     case 'warning':
       return {
-        container: 'border-amber-200 bg-amber-50/95 text-amber-900',
+        container: 'border-slate-200 bg-white text-slate-900',
         icon: 'text-amber-600',
       };
     case 'info':
       return {
-        container: 'border-blue-200 bg-blue-50/95 text-blue-900',
+        container: 'border-slate-200 bg-white text-slate-900',
         icon: 'text-blue-600',
       };
   }
@@ -67,7 +67,7 @@ export function GlobalToastViewport() {
           <div
             key={toast.id}
             role="status"
-            className={`pointer-events-auto rounded-xl border p-3 shadow-lg backdrop-blur-sm ${styles.container}`}
+            className={`pointer-events-auto rounded-md border p-3 shadow-sm ${styles.container}`}
           >
             <div className="flex items-start gap-2">
               <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${styles.icon}`} aria-hidden="true" />

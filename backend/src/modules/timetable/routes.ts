@@ -17,6 +17,7 @@ import {
 	handleCreateTimeBand,
 	handleDeleteDay,
 	handleDeleteSlotSystem,
+	handleDuplicateSlotSystem,
 	handleDeleteTimeBand,
 	handleDeleteBlock,
 	handleGetDays,
@@ -67,6 +68,7 @@ router.use(requireRole("ADMIN"));
 router.post("/slot-systems", handleCreateSlotSystem);
 router.get("/slot-systems", handleGetSlotSystems);
 router.delete("/slot-systems/:id", handleDeleteSlotSystem);
+router.post("/slot-systems/:id/duplicate", handleDuplicateSlotSystem);
 router.get("/slot-systems/:id/full", handleGetFullGrid);
 
 router.post("/days", handleCreateDay);

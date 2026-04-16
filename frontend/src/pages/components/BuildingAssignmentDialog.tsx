@@ -5,6 +5,7 @@ import { useBuildings } from "../../hooks/useBuildings";
 import { useUserBuildingAssignments, useUpdateUserBuildingAssignments } from "../../hooks/useUsers";
 import type { ManagedUser } from "../../lib/api/types";
 import { formatError } from "../../utils/formatError";
+import { BuildingSelector } from "./BuildingSelector";
 
 type BuildingAssignmentDialogProps = {
   user: ManagedUser | null;
@@ -14,7 +15,7 @@ type BuildingAssignmentDialogProps = {
 };
 
 export function BuildingAssignmentDialog({ user, open, onOpenChange, onSuccess }: BuildingAssignmentDialogProps) {
-  const [selectedBuildingIds, setSelectedBuildingIds] = useState<Set<number>>(new Set());
+  const [selectedBuildingIds, setSelectedBuildingIds] = useState<number[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,30 +25,12 @@ export function BuildingAssignmentDialog({ user, open, onOpenChange, onSuccess }
 
   useEffect(() => {
     if (currentAssignments?.buildingIds) {
-      setSelectedBuildingIds(new Set(currentAssignments.buildingIds));
+      setSelectedBuildingIds(currentAssignments.buildingIds);
     } else {
-      setSelectedBuildingIds(new Set());
+      setSelectedBuildingIds([]);
     }
     setError(null);
   }, [currentAssignments, user?.id]);
-
-  const toggleBuilding = (buildingId: number) => {
-    const newSet = new Set(selectedBuildingIds);
-    if (newSet.has(buildingId)) {
-      newSet.delete(buildingId);
-    } else {
-      newSet.add(buildingId);
-    }
-    setSelectedBuildingIds(newSet);
-  };
-
-  const toggleAll = () => {
-    if (selectedBuildingIds.size === buildings.length) {
-      setSelectedBuildingIds(new Set());
-    } else {
-      setSelectedBuildingIds(new Set(buildings.map(b => b.id)));
-    }
-  };
 
   const handleSave = async () => {
     if (!user) return;
@@ -58,7 +41,7 @@ export function BuildingAssignmentDialog({ user, open, onOpenChange, onSuccess }
     try {
       await updateAssignments.mutateAsync({
         userId: user.id,
-        buildingIds: Array.from(selectedBuildingIds),
+        buildingIds: selectedBuildingIds,
       });
       onSuccess();
       onOpenChange(false);
@@ -109,40 +92,16 @@ export function BuildingAssignmentDialog({ user, open, onOpenChange, onSuccess }
                 No buildings available
               </div>
             ) : (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b">
-                <span className="text-sm font-medium">
-                  {selectedBuildingIds.size} of {buildings.length} selected
-                </span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={toggleAll}
-                  disabled={saving}
-                >
-                  {selectedBuildingIds.size === buildings.length ? "Deselect All" : "Select All"}
-                </Button>
+              <div className="space-y-2">
+                <div className="text-xs text-muted-foreground">
+                  Keep selection focused for tighter routing permissions.
+                </div>
+                <BuildingSelector
+                  buildings={buildings}
+                  selectedBuildingIds={selectedBuildingIds}
+                  onSelectionChange={setSelectedBuildingIds}
+                />
               </div>
-
-              <div className="max-h-64 overflow-y-auto space-y-2 border rounded p-3">
-                {buildings.map((building) => (
-                  <label
-                    key={building.id}
-                    className="flex items-center gap-3 p-2 hover:bg-gray-50 rounded cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedBuildingIds.has(building.id)}
-                      onChange={() => toggleBuilding(building.id)}
-                      disabled={saving}
-                      className="rounded w-4 h-4"
-                    />
-                    <span className="text-sm flex-1">{building.name}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
             )}
           </div>
         )}

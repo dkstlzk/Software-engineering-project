@@ -5,6 +5,7 @@ import {
   createBlock,
   createDay,
   createSlotSystem,
+  duplicateSlotSystem,
   createTimeBand,
   deleteDay,
   deleteSlotSystem,
@@ -112,6 +113,31 @@ export async function handleDeleteSlotSystem(req: Request, res: Response) {
     return res.status(204).send();
   } catch (error) {
     return sendError(res, error, "Failed to delete slot system");
+  }
+}
+
+export async function handleDuplicateSlotSystem(req: Request, res: Response) {
+  try {
+    const sourceSlotSystemId = parsePositiveInteger(req.params.id);
+
+    if (!sourceSlotSystemId) {
+      return res.status(400).json({ error: "Invalid slot system id" });
+    }
+
+    const rawName = req.body?.name;
+
+    if (rawName !== undefined && typeof rawName !== "string") {
+      return res.status(400).json({ error: "name must be a string" });
+    }
+
+    const duplicated = await duplicateSlotSystem({
+      sourceSlotSystemId,
+      ...(typeof rawName === "string" ? { name: rawName } : {}),
+    });
+
+    return res.status(201).json(duplicated);
+  } catch (error) {
+    return sendError(res, error, "Failed to duplicate slot system");
   }
 }
 

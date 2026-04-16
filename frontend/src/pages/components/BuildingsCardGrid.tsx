@@ -4,7 +4,7 @@ import { useRooms } from "../../hooks/useRooms";
 import { BuildingCard } from "./BuildingCard";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
-import type { Building, UserRole } from "../../lib/api/types";
+import type { Building, Room, UserRole } from "../../lib/api/types";
 
 interface BuildingsCardGridProps {
   onBuildingClick: (building: Building) => void;
@@ -12,6 +12,8 @@ interface BuildingsCardGridProps {
   onAddClick: () => void;
   userRole?: UserRole;
   buildings?: Building[];
+  rooms?: Room[];
+  dataEnabled?: boolean;
   staffBuildingIds?: number[];
 }
 
@@ -21,15 +23,20 @@ export function BuildingsCardGrid({
   onAddClick,
   userRole,
   buildings: propBuildings,
+  rooms: propRooms,
+  dataEnabled = true,
   staffBuildingIds = [],
 }: BuildingsCardGridProps) {
   const [search, setSearch] = useState("");
   
   // Use provided buildings (from parent for scoped view) or fetch all
-  const { data: fetchedBuildings = [], isLoading, error, refetch } = useBuildings();
+  const shouldFetchBuildings = dataEnabled && propBuildings === undefined;
+  const { data: fetchedBuildings = [], isLoading, error, refetch } = useBuildings(shouldFetchBuildings);
   const buildings = propBuildings || fetchedBuildings;
-  
-  const { data: allRooms = [] } = useRooms();
+
+  const shouldFetchRooms = dataEnabled && propRooms === undefined;
+  const { data: fetchedRooms = [] } = useRooms(undefined, shouldFetchRooms);
+  const allRooms = propRooms || fetchedRooms;
 
   const isAdmin = userRole === "ADMIN";
   const isStaff = userRole === "STAFF";

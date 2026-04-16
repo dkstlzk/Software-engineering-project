@@ -14,6 +14,11 @@ import {
 import { createBookingsBulk, hasBookingOverlap } from "../bookings/services/bookingService";
 import type { BookingCreateResult } from "../bookings/services/bookingService";
 import {
+  findFirstHolidayOverlap,
+  listHolidays,
+} from "../holidays/service";
+import { toISTDateKey } from "../../shared/utils/istDateTime";
+import {
   freezeBookings,
   unfreezeBookings,
   getBookingFreezeState,
@@ -420,6 +425,10 @@ function toErrorMessage(error: unknown, fallback: string): string {
 }
 
 const BOOKING_CONFLICT_CODE = "ROOM_OVERLAP";
+
+function buildHolidaySkipReason(holiday: { name: string; startDate: string; endDate: string }): string {
+  return `Skipped due to holiday: ${holiday.name} (${holiday.startDate} to ${holiday.endDate})`;
+}
 
 function isBookingConflictMessage(message: string | null | undefined): boolean {
   if (!message) {
@@ -3418,6 +3427,16 @@ export async function commitTimetableImport(
 
   const warnings: string[] = [];
   const conflictingBookings: CommitConflictItem[] = [];
+  const termStartDateKey = toISTDateKey(batch.termStartDate);
+  const termEndDateKey = toISTDateKey(batch.termEndDate);
+  const timetableHolidays =
+    termStartDateKey && termEndDateKey
+      ? await listHolidays({
+          fromDate: termStartDateKey,
+          toDate: termEndDateKey,
+        })
+      : [];
+  let holidaySkippedOccurrences = 0;
 
   for (const row of rows) {
     const summary: CommitRowSummary = {
@@ -3556,6 +3575,51 @@ export async function commitTimetableImport(
           .from(timetableImportOccurrences)
           .where(eq(timetableImportOccurrences.dedupeKey, dedupeKey))
           .limit(1);
+
+        const overlappingHoliday = findFirstHolidayOverlap(
+          timetableHolidays,
+          interval.startAt,
+          interval.endAt,
+        );
+
+        if (overlappingHoliday) {
+          const skipReason = buildHolidaySkipReason(overlappingHoliday);
+
+          summary.skipped += 1;
+          holidaySkippedOccurrences += 1;
+
+          if (existingOccurrence?.bookingId) {
+            await db.delete(bookings).where(eq(bookings.id, existingOccurrence.bookingId));
+          }
+
+          if (existingOccurrence?.id) {
+            await db
+              .update(timetableImportOccurrences)
+              .set({
+                status: "SKIPPED",
+                bookingId: null,
+                errorMessage: skipReason,
+              })
+              .where(eq(timetableImportOccurrences.id, existingOccurrence.id));
+          } else {
+            await db
+              .insert(timetableImportOccurrences)
+              .values({
+                batchId: batch.id,
+                rowId: row.id,
+                roomId: resolvedRoomId,
+                startAt: interval.startAt,
+                endAt: interval.endAt,
+                source: "TIMETABLE_ALLOCATION",
+                sourceRef: `batch:${batch.id}:row:${row.id}:block:${descriptor.blockId}`,
+                dedupeKey,
+                status: "SKIPPED",
+                errorMessage: skipReason,
+              });
+          }
+
+          continue;
+        }
 
         if (existingOccurrence?.bookingId) {
           summary.alreadyProcessed += 1;
@@ -3749,6 +3813,10 @@ export async function commitTimetableImport(
     (sum, row) => sum + row.bookingConflictReasons.length,
     0,
   );
+
+  if (holidaySkippedOccurrences > 0) {
+    warnings.push(`${holidaySkippedOccurrences} occurrence(s) skipped due to holiday coverage.`);
+  }
 
   return {
     batchId: batch.id,
@@ -4070,6 +4138,15 @@ export async function detectCommitConflicts(
     const buildingLookup = await getBuildingRoomLookup();
     const slotSystemStructure = await getSlotSystemStructure(batch.slotSystemId);
     const createdSlotLabelByKey = new Map<string, string>();
+    const termStartDateKey = toISTDateKey(batch.termStartDate);
+    const termEndDateKey = toISTDateKey(batch.termEndDate);
+    const timetableHolidays =
+      termStartDateKey && termEndDateKey
+        ? await listHolidays({
+            fromDate: termStartDateKey,
+            toDate: termEndDateKey,
+          })
+        : [];
 
     const conflicts: DetectedConflict[] = [];
     let totalOccurrences = 0;
@@ -4151,6 +4228,48 @@ export async function detectCommitConflicts(
             .from(timetableImportOccurrences)
             .where(eq(timetableImportOccurrences.dedupeKey, dedupeKey))
             .limit(1);
+
+          const overlappingHoliday = findFirstHolidayOverlap(
+            timetableHolidays,
+            interval.startAt,
+            interval.endAt,
+          );
+
+          if (overlappingHoliday) {
+            const skipReason = buildHolidaySkipReason(overlappingHoliday);
+
+            if (existingOccurrence?.bookingId) {
+              await db.delete(bookings).where(eq(bookings.id, existingOccurrence.bookingId));
+            }
+
+            if (existingOccurrence?.id) {
+              await db
+                .update(timetableImportOccurrences)
+                .set({
+                  status: "SKIPPED",
+                  bookingId: null,
+                  errorMessage: skipReason,
+                })
+                .where(eq(timetableImportOccurrences.id, existingOccurrence.id));
+            } else {
+              await db
+                .insert(timetableImportOccurrences)
+                .values({
+                  batchId: batch.id,
+                  rowId: row.id,
+                  roomId: resolvedRoomId,
+                  startAt: interval.startAt,
+                  endAt: interval.endAt,
+                  source: "TIMETABLE_ALLOCATION",
+                  sourceRef: `batch:${batch.id}:row:${row.id}:block:${descriptor.blockId}`,
+                  dedupeKey,
+                  status: "SKIPPED",
+                  errorMessage: skipReason,
+                });
+            }
+
+            continue;
+          }
 
           if (existingOccurrence?.bookingId) {
             // Already processed, skip
@@ -4344,6 +4463,16 @@ export async function commitWithResolutions(
         )
       );
 
+    const termStartDateKey = toISTDateKey(batch.termStartDate);
+    const termEndDateKey = toISTDateKey(batch.termEndDate);
+    const timetableHolidays =
+      termStartDateKey && termEndDateKey
+        ? await listHolidays({
+            fromDate: termStartDateKey,
+            toDate: termEndDateKey,
+          })
+        : [];
+
     const changes: CommitWithResolutionsReport["changes"] = {
       created: [],
       deleted: [],
@@ -4365,6 +4494,29 @@ export async function commitWithResolutions(
 
       // Also skip non-PENDING occurrences for idempotency
       if (occurrence.status !== "PENDING") {
+        continue;
+      }
+
+      const overlappingHoliday = findFirstHolidayOverlap(
+        timetableHolidays,
+        new Date(occurrence.startAt),
+        new Date(occurrence.endAt),
+      );
+
+      if (overlappingHoliday) {
+        const skipReason = buildHolidaySkipReason(overlappingHoliday);
+
+        skippedOccurrences++;
+        changes.skipped.push({
+          occurrenceId: occurrence.id,
+          reason: skipReason,
+        });
+
+        await db
+          .update(timetableImportOccurrences)
+          .set({ status: "SKIPPED", errorMessage: skipReason })
+          .where(eq(timetableImportOccurrences.id, occurrence.id));
+
         continue;
       }
 

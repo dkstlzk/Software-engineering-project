@@ -12,6 +12,7 @@ import { getNotifications, markAllNotificationsRead, markNotificationRead } from
 import type { AppNotification } from '../../lib/api';
 import { Bell, LogOut, User, Settings, Mail } from 'lucide-react';
 import { formatError } from '../../utils/formatError';
+import { formatDateTimeDDMMYYYY } from '../../utils/datetime';
 
 function formatNotificationTime(sentAt: string): string {
   const parsed = new Date(sentAt);
@@ -20,12 +21,7 @@ function formatNotificationTime(sentAt: string): string {
     return sentAt;
   }
 
-  return parsed.toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return formatDateTimeDDMMYYYY(parsed);
 }
 
 export function Header() {

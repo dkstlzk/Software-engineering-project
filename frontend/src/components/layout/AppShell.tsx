@@ -5,7 +5,7 @@ import { Sidebar, MobileSidebarToggle } from './Sidebar';
 
 export function AppShell() {
   return (
-    <div className="flex h-screen flex-col bg-gray-50">
+    <div className="flex h-screen flex-col bg-slate-50">
       {/* Top Header */}
       <Header />
 
@@ -19,12 +19,12 @@ export function AppShell() {
         {/* Main Content Area */}
         <main className="flex-1 overflow-auto">
           {/* Mobile sidebar toggle (shown only on mobile) */}
-          <div className="lg:hidden p-4 border-b bg-white sticky top-0 z-30">
+          <div className="lg:hidden p-4 border-b border-slate-200 bg-white sticky top-0 z-30">
             <MobileSidebarToggle />
           </div>
 
           {/* Page Content */}
-          <div className="p-6 max-w-7xl mx-auto">
+          <div className="p-8 max-w-7xl mx-auto">
             <Outlet />
           </div>
         </main>

@@ -282,6 +282,145 @@ export async function deleteSlotSystem(slotSystemId: number) {
   }
 }
 
+export async function duplicateSlotSystem(input: {
+  sourceSlotSystemId: number;
+  name?: string;
+}) {
+  const sourceSlotSystemId = toPositiveInteger(input.sourceSlotSystemId);
+
+  if (!sourceSlotSystemId) {
+    throw createServiceError(400, "Invalid source slot system id");
+  }
+
+  const sourceSystem = await ensureSlotSystemExists(sourceSlotSystemId);
+  const targetName =
+    typeof input.name === "string" && input.name.trim().length > 0
+      ? input.name.trim()
+      : `${sourceSystem.name} (Copy)`;
+
+  return db.transaction(async (tx) => {
+    const [createdSystem] = await tx
+      .insert(slotSystems)
+      .values({ name: targetName })
+      .returning();
+
+    if (!createdSystem) {
+      throw createServiceError(500, "Failed to create duplicated slot system");
+    }
+
+    const [sourceDays, sourceBands, sourceBlocks] = await Promise.all([
+      tx
+        .select({
+          id: slotDays.id,
+          dayOfWeek: slotDays.dayOfWeek,
+          orderIndex: slotDays.orderIndex,
+          laneCount: slotDays.laneCount,
+        })
+        .from(slotDays)
+        .where(eq(slotDays.slotSystemId, sourceSlotSystemId))
+        .orderBy(asc(slotDays.orderIndex), asc(slotDays.id)),
+      tx
+        .select({
+          id: slotTimeBands.id,
+          startTime: slotTimeBands.startTime,
+          endTime: slotTimeBands.endTime,
+          orderIndex: slotTimeBands.orderIndex,
+        })
+        .from(slotTimeBands)
+        .where(eq(slotTimeBands.slotSystemId, sourceSlotSystemId))
+        .orderBy(asc(slotTimeBands.orderIndex), asc(slotTimeBands.id)),
+      tx
+        .select({
+          dayId: slotBlocks.dayId,
+          startBandId: slotBlocks.startBandId,
+          laneIndex: slotBlocks.laneIndex,
+          rowSpan: slotBlocks.rowSpan,
+          label: slotBlocks.label,
+        })
+        .from(slotBlocks)
+        .where(eq(slotBlocks.slotSystemId, sourceSlotSystemId))
+        .orderBy(asc(slotBlocks.dayId), asc(slotBlocks.startBandId), asc(slotBlocks.id)),
+    ]);
+
+    const dayIdMap = new Map<number, number>();
+    for (const day of sourceDays) {
+      const [createdDay] = await tx
+        .insert(slotDays)
+        .values({
+          slotSystemId: createdSystem.id,
+          dayOfWeek: day.dayOfWeek,
+          orderIndex: day.orderIndex,
+          laneCount: day.laneCount,
+        })
+        .returning({ id: slotDays.id });
+
+      if (!createdDay) {
+        throw createServiceError(500, "Failed to duplicate slot-system day");
+      }
+
+      dayIdMap.set(day.id, createdDay.id);
+    }
+
+    const bandIdMap = new Map<number, number>();
+    for (const band of sourceBands) {
+      const [createdBand] = await tx
+        .insert(slotTimeBands)
+        .values({
+          slotSystemId: createdSystem.id,
+          startTime: String(band.startTime),
+          endTime: String(band.endTime),
+          orderIndex: band.orderIndex,
+        })
+        .returning({ id: slotTimeBands.id });
+
+      if (!createdBand) {
+        throw createServiceError(500, "Failed to duplicate slot-system time band");
+      }
+
+      bandIdMap.set(band.id, createdBand.id);
+    }
+
+    if (sourceBlocks.length > 0) {
+      const duplicatedBlocks = sourceBlocks
+        .map((block) => {
+          const mappedDayId = dayIdMap.get(block.dayId);
+          const mappedBandId = bandIdMap.get(block.startBandId);
+
+          if (!mappedDayId || !mappedBandId) {
+            return null;
+          }
+
+          return {
+            slotSystemId: createdSystem.id,
+            dayId: mappedDayId,
+            startBandId: mappedBandId,
+            laneIndex: block.laneIndex,
+            rowSpan: block.rowSpan,
+            label: block.label,
+          };
+        })
+        .filter(
+          (
+            value,
+          ): value is {
+            slotSystemId: number;
+            dayId: number;
+            startBandId: number;
+            laneIndex: number;
+            rowSpan: number;
+            label: string;
+          } => value !== null,
+        );
+
+      if (duplicatedBlocks.length > 0) {
+        await tx.insert(slotBlocks).values(duplicatedBlocks);
+      }
+    }
+
+    return createdSystem;
+  });
+}
+
 export async function createDay(input: {
   slotSystemId: number;
   dayOfWeek: string;

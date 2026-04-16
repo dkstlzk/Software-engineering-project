@@ -4,7 +4,7 @@ import {
   addDayLane as apiAddDayLane,
   createBooking as apiCreateBooking,
   createRoom as apiCreateRoom,
-
+  duplicateSlotSystem as apiDuplicateSlotSystem,
   getTimetableImportBatch as apiGetTimetableImportBatch,
   getTimetableImportBatches as apiGetTimetableImportBatches,
   deleteBooking as apiDeleteBooking,
@@ -41,7 +41,6 @@ import {
   finalizeCommitSession as apiFinalizeCommitSession,
   cancelCommitSession as apiCancelCommitSession,
   previewSlotSystemChanges as apiPreviewSlotSystemChanges,
-
 } from "../lib/api";
 import type {
   Building,
@@ -67,10 +66,9 @@ import type {
   ChangePreviewResult,
   EditCommitSessionStartResponse,
   TimetableSnapshotState,
-
 } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
-import { formatDateDDMMYYYY } from "../utils/datetime";
+import { formatDateDDMMYYYY, formatDateTimeDDMMYYYY } from "../utils/datetime";
 import { DateInput } from "../components/DateInput";
 import {
   formatBookingImpactMessage,
@@ -90,6 +88,12 @@ const DAY_OF_WEEK_OPTIONS: DayOfWeek[] = [
   "SUN",
 ];
 
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
+
+function toISTShiftedDate(date: Date): Date {
+  return new Date(date.getTime() + IST_OFFSET_MS);
+}
+
 const DAY_LABELS: Record<DayOfWeek, string> = {
   MON: "Monday",
   TUE: "Tuesday",
@@ -99,6 +103,54 @@ const DAY_LABELS: Record<DayOfWeek, string> = {
   SAT: "Saturday",
   SUN: "Sunday",
 };
+
+const TIMETABLE_QOL_PREFERENCES_KEY = "qol.timetable.preferences.v1";
+
+type TimetableQoLPreferences = {
+  autoLoadGridOnSystemChange: boolean;
+  autoLoadSheetStatusOnSystemChange: boolean;
+  autoLoadCurrentSheetOnSelection: boolean;
+};
+
+const DEFAULT_TIMETABLE_QOL_PREFERENCES: TimetableQoLPreferences = {
+  autoLoadGridOnSystemChange: false,
+  autoLoadSheetStatusOnSystemChange: false,
+  autoLoadCurrentSheetOnSelection: false,
+};
+
+function readTimetableQoLPreferences(): TimetableQoLPreferences {
+  if (typeof window === "undefined") {
+    return DEFAULT_TIMETABLE_QOL_PREFERENCES;
+  }
+
+  const raw = window.localStorage.getItem(TIMETABLE_QOL_PREFERENCES_KEY);
+
+  if (!raw) {
+    return DEFAULT_TIMETABLE_QOL_PREFERENCES;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<TimetableQoLPreferences> | null;
+
+    if (!parsed || typeof parsed !== "object") {
+      return DEFAULT_TIMETABLE_QOL_PREFERENCES;
+    }
+
+    return {
+      autoLoadGridOnSystemChange:
+        parsed.autoLoadGridOnSystemChange ??
+        DEFAULT_TIMETABLE_QOL_PREFERENCES.autoLoadGridOnSystemChange,
+      autoLoadSheetStatusOnSystemChange:
+        parsed.autoLoadSheetStatusOnSystemChange ??
+        DEFAULT_TIMETABLE_QOL_PREFERENCES.autoLoadSheetStatusOnSystemChange,
+      autoLoadCurrentSheetOnSelection:
+        parsed.autoLoadCurrentSheetOnSelection ??
+        DEFAULT_TIMETABLE_QOL_PREFERENCES.autoLoadCurrentSheetOnSelection,
+    };
+  } catch {
+    return DEFAULT_TIMETABLE_QOL_PREFERENCES;
+  }
+}
 
 type DragSelection = {
   dayId: number;
@@ -255,6 +307,20 @@ function toTimeLabel(timeValue: string): string {
   return timeValue.slice(0, 5);
 }
 
+function addOneHour(timeValue: string): string {
+  const normalized = toTimeLabel(timeValue);
+  const [hoursRaw, minutesRaw] = normalized.split(":");
+  const hours = Number(hoursRaw);
+  const minutes = Number(minutesRaw);
+
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) {
+    return "10:00";
+  }
+
+  const nextHours = (hours + 1) % 24;
+  return `${String(nextHours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
 function parseAliasMap(raw: string): Record<string, string> {
   const output: Record<string, string> = {};
 
@@ -307,11 +373,13 @@ function toDateInputValue(value: string): string {
     return "";
   }
 
-  const year = parsed.getFullYear();
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  const hours = String(parsed.getHours()).padStart(2, "0");
-  const minutes = String(parsed.getMinutes()).padStart(2, "0");
+  const shifted = toISTShiftedDate(parsed);
+
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(shifted.getUTCDate()).padStart(2, "0");
+  const hours = String(shifted.getUTCHours()).padStart(2, "0");
+  const minutes = String(shifted.getUTCMinutes()).padStart(2, "0");
 
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
@@ -323,9 +391,11 @@ function toDateOnlyInputValue(value: string): string {
     return "";
   }
 
-  const year = parsed.getFullYear();
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
+  const shifted = toISTShiftedDate(parsed);
+
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(shifted.getUTCDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
 }
@@ -354,7 +424,7 @@ function toConflictWindowRange(startAt: string, endAt: string): string {
     return `${startAt} - ${endAt}`;
   }
 
-  return `${start.toLocaleString()} - ${end.toLocaleString()}`;
+  return `${formatDateTimeDDMMYYYY(start)} - ${formatDateTimeDDMMYYYY(end)}`;
 }
 
 function toSnapshotStateFromGrid(grid: SlotFullGrid): TimetableSnapshotState {
@@ -380,6 +450,103 @@ function toSnapshotStateFromGrid(grid: SlotFullGrid): TimetableSnapshotState {
       rowSpan: block.rowSpan,
       label: block.label,
     })),
+  };
+}
+
+function getNextSnapshotEntityId(values: Array<{ id: number }>): number {
+  const maxId = values.reduce((currentMax, value) => {
+    return Number.isInteger(value.id) ? Math.max(currentMax, value.id) : currentMax;
+  }, 0);
+
+  return maxId + 1;
+}
+
+function normalizeSnapshotDraftForCommit(
+  snapshot: TimetableSnapshotState,
+  slotSystemId: number,
+): TimetableSnapshotState {
+  const days = [...snapshot.days]
+    .map((day) => ({
+      id: Number(day.id),
+      dayOfWeek: day.dayOfWeek,
+      orderIndex: Number(day.orderIndex),
+      laneCount: Math.max(1, Number(day.laneCount) || 1),
+    }))
+    .filter((day) => Number.isInteger(day.id) && day.id > 0)
+    .sort((a, b) => {
+      if (a.orderIndex !== b.orderIndex) {
+        return a.orderIndex - b.orderIndex;
+      }
+
+      return a.id - b.id;
+    })
+    .map((day, index) => ({
+      ...day,
+      orderIndex: index,
+    }));
+
+  const timeBands = [...snapshot.timeBands]
+    .map((band) => ({
+      id: Number(band.id),
+      startTime: String(band.startTime ?? "").trim(),
+      endTime: String(band.endTime ?? "").trim(),
+      orderIndex: Number(band.orderIndex),
+    }))
+    .filter((band) => Number.isInteger(band.id) && band.id > 0)
+    .sort((a, b) => {
+      if (a.orderIndex !== b.orderIndex) {
+        return a.orderIndex - b.orderIndex;
+      }
+
+      return a.id - b.id;
+    })
+    .map((band, index) => ({
+      ...band,
+      orderIndex: index,
+    }));
+
+  const dayIds = new Set(days.map((day) => day.id));
+  const bandIds = new Set(timeBands.map((band) => band.id));
+
+  const blocks = [...snapshot.blocks]
+    .map((block) => ({
+      id: Number(block.id),
+      dayId: Number(block.dayId),
+      startBandId: Number(block.startBandId),
+      laneIndex: Math.max(0, Number(block.laneIndex) || 0),
+      rowSpan: Math.max(1, Number(block.rowSpan) || 1),
+      label: String(block.label ?? "").trim(),
+    }))
+    .filter(
+      (block) =>
+        Number.isInteger(block.id) &&
+        block.id > 0 &&
+        dayIds.has(block.dayId) &&
+        bandIds.has(block.startBandId) &&
+        block.label.length > 0,
+    )
+    .sort((a, b) => {
+      if (a.dayId !== b.dayId) {
+        return a.dayId - b.dayId;
+      }
+
+      if (a.startBandId !== b.startBandId) {
+        return a.startBandId - b.startBandId;
+      }
+
+      if (a.laneIndex !== b.laneIndex) {
+        return a.laneIndex - b.laneIndex;
+      }
+
+      return a.id - b.id;
+    });
+
+  return {
+    slotSystemId,
+    days,
+    timeBands,
+    blocks,
+    ...(snapshot.roomAssignments ? { roomAssignments: snapshot.roomAssignments } : {}),
   };
 }
 
@@ -516,6 +683,10 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
   const { user } = useAuth();
   const isAdmin = user?.role === "ADMIN";
 
+  const [qolPreferences, setQolPreferences] = useState<TimetableQoLPreferences>(() =>
+    readTimetableQoLPreferences(),
+  );
+
   const [slotSystems, setSlotSystems] = useState<SlotSystem[]>([]);
   const [selectedSystemId, setSelectedSystemId] = useState<number | "">("");
   const [grid, setGrid] = useState<SlotFullGrid | null>(null);
@@ -555,6 +726,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
   const [importBatches, setImportBatches] = useState<TimetableImportBatchSummary[]>([]);
   const [importBatchesLoading, setImportBatchesLoading] = useState(false);
   const [importBatchesError, setImportBatchesError] = useState<string | null>(null);
+  const [hasLoadedImportBatches, setHasLoadedImportBatches] = useState(false);
   const [selectedBatchId, setSelectedBatchId] = useState<number | "">("");
 
   const [previewReport, setPreviewReport] = useState<TimetableImportPreviewReport | null>(null);
@@ -599,7 +771,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
   const [editStartLoading, setEditStartLoading] = useState(false);
   const [editStartResult, setEditStartResult] =
     useState<EditCommitSessionStartResponse | null>(null);
-  const [editDraftJson, setEditDraftJson] = useState("");
+  const [editDraftState, setEditDraftState] = useState<TimetableSnapshotState | null>(null);
   const [workspaceAutoOpenedForSystemId, setWorkspaceAutoOpenedForSystemId] = useState<number | null>(null);
   const [editSessionStatus, setEditSessionStatus] = useState<"VIEW" | "EDITING" | "COMMITTING">("VIEW");
   const [showPruneConfirmation, setShowPruneConfirmation] = useState(false);
@@ -609,6 +781,56 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
   const days: SlotDay[] = grid?.days ?? [];
   const timeBands: SlotTimeBand[] = grid?.timeBands ?? [];
   const blocks: SlotBlock[] = grid?.blocks ?? [];
+
+  const draftDays = useMemo(() => {
+    if (!editDraftState) {
+      return [];
+    }
+
+    return [...editDraftState.days].sort((a, b) => {
+      if (a.orderIndex !== b.orderIndex) {
+        return a.orderIndex - b.orderIndex;
+      }
+
+      return a.id - b.id;
+    });
+  }, [editDraftState]);
+
+  const draftTimeBands = useMemo(() => {
+    if (!editDraftState) {
+      return [];
+    }
+
+    return [...editDraftState.timeBands].sort((a, b) => {
+      if (a.orderIndex !== b.orderIndex) {
+        return a.orderIndex - b.orderIndex;
+      }
+
+      return a.id - b.id;
+    });
+  }, [editDraftState]);
+
+  const draftBlocks = useMemo(() => {
+    if (!editDraftState) {
+      return [];
+    }
+
+    return [...editDraftState.blocks].sort((a, b) => {
+      if (a.dayId !== b.dayId) {
+        return a.dayId - b.dayId;
+      }
+
+      if (a.startBandId !== b.startBandId) {
+        return a.startBandId - b.startBandId;
+      }
+
+      if (a.laneIndex !== b.laneIndex) {
+        return a.laneIndex - b.laneIndex;
+      }
+
+      return a.id - b.id;
+    });
+  }, [editDraftState]);
 
   const isImportBatchCommitted = previewReport?.status === "COMMITTED";
   const isDecisionEditingLocked =
@@ -795,6 +1017,10 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
   const showImportControls = view === "all" || view === "imports";
   const showProcessedSection = view === "all" || view === "processed";
   const showGridSection = view === "all" || view === "structure" || view === "workspace";
+  const activeBatchId = selectedBatchId === "" ? (previewReport?.batchId ?? null) : selectedBatchId;
+  const canLoadProcessedRows = activeBatchId !== null;
+  const isProcessedRowsLoadedForActiveBatch =
+    processedRowsReport !== null && processedRowsReport.batchId === activeBatchId;
 
   const previewRowById = useMemo(() => {
     return new Map<number, TimetableImportPreviewRow>(
@@ -862,6 +1088,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     if (slotSystemId === "") {
       setImportBatches([]);
       setImportBatchesError(null);
+      setHasLoadedImportBatches(false);
       setSelectedBatchId("");
       return;
     }
@@ -872,27 +1099,17 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     try {
       const batches = await apiGetTimetableImportBatches({
         slotSystemId,
-        limit: 50,
+        limit: 1,
       });
 
       setImportBatches(batches);
-
-      setSelectedBatchId((current) => {
-        if (current !== "" && batches.some((batch) => batch.batchId === current)) {
-          return current;
-        }
-
-        if (previewReport && batches.some((batch) => batch.batchId === previewReport.batchId)) {
-          return previewReport.batchId;
-        }
-
-        return batches[0]?.batchId ?? "";
-      });
+      setSelectedBatchId(batches[0]?.batchId ?? "");
     } catch (e) {
       setImportBatches([]);
       setImportBatchesError(e instanceof Error ? e.message : "Failed to load import batches");
     } finally {
       setImportBatchesLoading(false);
+      setHasLoadedImportBatches(true);
     }
   };
 
@@ -975,13 +1192,28 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     try {
       const report = await apiGetTimetableImportBatch(batchId);
       hydratePreviewFromBatch(report);
-      await loadProcessedRows(report.batchId);
+      setProcessedRowsReport(null);
+      setProcessedRowsError(null);
+      setProcessedBookingEdits({});
+      setNewRowBookingDrafts({});
+      setImportInfo(
+        `Loaded sheet batch #${report.batchId}. Processed rows are available on demand.`,
+      );
     } catch (e) {
       setImportError(e instanceof Error ? e.message : "Failed to load import batch");
     } finally {
       setImportLoading(false);
     }
   }, []);
+
+  const handleLoadProcessedRowsForActiveBatch = async () => {
+    if (activeBatchId === null) {
+      setProcessedRowsError("Load a sheet first, then load processed rows.");
+      return;
+    }
+
+    await loadProcessedRows(activeBatchId);
+  };
 
   const updateProcessedBookingEdit = (
     bookingId: number,
@@ -1110,43 +1342,75 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      TIMETABLE_QOL_PREFERENCES_KEY,
+      JSON.stringify(qolPreferences),
+    );
+  }, [qolPreferences]);
+
+  useEffect(() => {
     if (selectedSystemId === "") {
       setGrid(null);
       setImportBatches([]);
       setImportBatchesError(null);
+      setHasLoadedImportBatches(false);
       setSelectedBatchId("");
+      setPreviewReport(null);
+      setImportInfo(null);
+      setImportError(null);
+      setProcessedRowsReport(null);
+      setProcessedRowsError(null);
+      setProcessedBookingEdits({});
+      setNewRowBookingDrafts({});
       return;
     }
 
-    void loadGrid(selectedSystemId);
-    void loadImportBatches(selectedSystemId);
+    setGrid(null);
+    setImportBatches([]);
+    setImportBatchesError(null);
+    setHasLoadedImportBatches(false);
+    setSelectedBatchId("");
+    setPreviewReport(null);
+    setImportInfo(null);
+    setImportError(null);
+    setProcessedRowsReport(null);
+    setProcessedRowsError(null);
+    setProcessedBookingEdits({});
+    setNewRowBookingDrafts({});
+
+    if (showGridSection && qolPreferences.autoLoadGridOnSystemChange) {
+      void loadGrid(selectedSystemId);
+    }
+
+    if (showImportSection && qolPreferences.autoLoadSheetStatusOnSystemChange) {
+      void loadImportBatches(selectedSystemId);
+    }
   }, [selectedSystemId]);
 
   useEffect(() => {
-    if (view !== "processed") {
+    if (!qolPreferences.autoLoadCurrentSheetOnSelection) {
       return;
     }
 
-    if (selectedBatchId === "" || importLoading || processedRowsLoading) {
+    if (selectedBatchId === "" || importLoading) {
       return;
     }
 
-    const hasPreview = previewReport?.batchId === selectedBatchId;
-    const hasProcessedRows = processedRowsReport?.batchId === selectedBatchId;
-
-    if (hasPreview && hasProcessedRows) {
+    if (previewReport?.batchId === selectedBatchId) {
       return;
     }
 
     void handleLoadImportBatch(selectedBatchId);
   }, [
-    view,
     selectedBatchId,
     importLoading,
-    processedRowsLoading,
     previewReport?.batchId,
-    processedRowsReport?.batchId,
     handleLoadImportBatch,
+    qolPreferences.autoLoadCurrentSheetOnSelection,
   ]);
 
   const handleCreateSlotSystem = async (event: FormEvent<HTMLFormElement>) => {
@@ -1199,6 +1463,47 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
       await loadSlotSystems();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete slot system");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDuplicateSlotSystem = async () => {
+    if (selectedSystemId === "") {
+      setError("Select a slot system first");
+      return;
+    }
+
+    const sourceName = selectedSystem?.name ?? `Slot System ${selectedSystemId}`;
+    const defaultName = `${sourceName} (Copy)`;
+
+    const requestedName =
+      typeof window === "undefined"
+        ? defaultName
+        : window.prompt("Name for duplicated slot system", defaultName);
+
+    if (requestedName === null) {
+      return;
+    }
+
+    const trimmedName = requestedName.trim();
+
+    if (!trimmedName) {
+      setError("Duplicate slot system name is required");
+      return;
+    }
+
+    setActionLoading(true);
+    setError(null);
+    setSuccessMessage(null);
+
+    try {
+      const duplicated = await apiDuplicateSlotSystem(selectedSystemId, trimmedName);
+      await loadSlotSystems();
+      setSelectedSystemId(duplicated.id);
+      setSuccessMessage(`Duplicated "${sourceName}" as "${duplicated.name}".`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to duplicate slot system");
     } finally {
       setActionLoading(false);
     }
@@ -2452,9 +2757,14 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
       const preview = await apiPreviewSlotSystemChanges(Number(selectedSystemId), {});
       setChangePreview(preview);
       if (grid && grid.slotSystem.id === Number(selectedSystemId)) {
-        setEditDraftJson(JSON.stringify(toSnapshotStateFromGrid(grid), null, 2));
+        setEditDraftState(
+          normalizeSnapshotDraftForCommit(
+            toSnapshotStateFromGrid(grid),
+            Number(selectedSystemId),
+          ),
+        );
       } else {
-        setEditDraftJson("");
+        setEditDraftState(null);
       }
       setShowChangeWorkspace(true);
     } catch (e) {
@@ -2515,17 +2825,39 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     let startedCommitSessionId: number | null = null;
 
     try {
-      let snapshot = toSnapshotStateFromGrid(grid);
+      const baseSnapshot = editDraftState ?? toSnapshotStateFromGrid(grid);
+      const snapshot = normalizeSnapshotDraftForCommit(baseSnapshot, Number(selectedSystemId));
 
-      if (editDraftJson.trim().length > 0) {
-        try {
-          const parsed = JSON.parse(editDraftJson) as TimetableSnapshotState;
-          snapshot = parsed;
-        } catch {
-          setChangeError("Edit draft JSON is invalid. Fix the JSON before starting commit.");
+      if (snapshot.days.length === 0) {
+        setChangeError("Draft must contain at least one day.");
+        setEditSessionStatus("VIEW");
+        return;
+      }
+
+      if (snapshot.timeBands.length === 0) {
+        setChangeError("Draft must contain at least one time band.");
+        setEditSessionStatus("VIEW");
+        return;
+      }
+
+      const seenDayOfWeek = new Set<string>();
+      for (const day of snapshot.days) {
+        if (seenDayOfWeek.has(day.dayOfWeek)) {
+          setChangeError("Each day of week can appear only once in the draft.");
           setEditSessionStatus("VIEW");
           return;
         }
+        seenDayOfWeek.add(day.dayOfWeek);
+      }
+
+      const hasEmptyBandWindow = snapshot.timeBands.some(
+        (band) => !band.startTime || !band.endTime,
+      );
+
+      if (hasEmptyBandWindow) {
+        setChangeError("Every time band must have both start and end time.");
+        setEditSessionStatus("VIEW");
+        return;
       }
 
       const result = await apiStartEditCommitSession({
@@ -2644,12 +2976,274 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     }
   };
 
+  const resetEditDraftFromGrid = useCallback(() => {
+    if (selectedSystemId === "" || !grid || grid.slotSystem.id !== Number(selectedSystemId)) {
+      setEditDraftState(null);
+      return;
+    }
+
+    setEditDraftState(
+      normalizeSnapshotDraftForCommit(toSnapshotStateFromGrid(grid), Number(selectedSystemId)),
+    );
+  }, [grid, selectedSystemId]);
+
+  const mutateEditDraft = useCallback(
+    (updater: (current: TimetableSnapshotState) => TimetableSnapshotState) => {
+      if (selectedSystemId === "") {
+        return;
+      }
+
+      setEditDraftState((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return normalizeSnapshotDraftForCommit(updater(current), Number(selectedSystemId));
+      });
+    },
+    [selectedSystemId],
+  );
+
+  const handleDraftAddDay = () => {
+    if (selectedSystemId === "") {
+      return;
+    }
+
+    mutateEditDraft((current) => {
+      const used = new Set(current.days.map((day) => day.dayOfWeek));
+      const nextDayOfWeek = DAY_OF_WEEK_OPTIONS.find((day) => !used.has(day)) ?? "MON";
+
+      return {
+        ...current,
+        days: [
+          ...current.days,
+          {
+            id: getNextSnapshotEntityId(current.days),
+            dayOfWeek: nextDayOfWeek,
+            orderIndex: current.days.length,
+            laneCount: 1,
+          },
+        ],
+      };
+    });
+  };
+
+  const handleDraftUpdateDay = (
+    dayId: number,
+    patch: Partial<TimetableSnapshotState["days"][number]>,
+  ) => {
+    mutateEditDraft((current) => ({
+      ...current,
+      days: current.days.map((day) => (day.id === dayId ? { ...day, ...patch } : day)),
+    }));
+  };
+
+  const handleDraftMoveDay = (dayId: number, direction: -1 | 1) => {
+    mutateEditDraft((current) => {
+      const ordered = [...current.days].sort((a, b) => a.orderIndex - b.orderIndex || a.id - b.id);
+      const fromIndex = ordered.findIndex((day) => day.id === dayId);
+      const toIndex = fromIndex + direction;
+
+      if (fromIndex < 0 || toIndex < 0 || toIndex >= ordered.length) {
+        return current;
+      }
+
+      const [moved] = ordered.splice(fromIndex, 1);
+
+      if (!moved) {
+        return current;
+      }
+
+      ordered.splice(toIndex, 0, moved);
+
+      return {
+        ...current,
+        days: ordered.map((day, index) => ({ ...day, orderIndex: index })),
+      };
+    });
+  };
+
+  const handleDraftRemoveDay = (dayId: number) => {
+    mutateEditDraft((current) => ({
+      ...current,
+      days: current.days.filter((day) => day.id !== dayId),
+      blocks: current.blocks.filter((block) => block.dayId !== dayId),
+    }));
+  };
+
+  const handleDraftAddTimeBand = () => {
+    mutateEditDraft((current) => {
+      const sortedBands = [...current.timeBands].sort(
+        (a, b) => a.orderIndex - b.orderIndex || a.id - b.id,
+      );
+      const previousBand = sortedBands[sortedBands.length - 1];
+      const startTime = previousBand ? toTimeLabel(previousBand.endTime) : "09:00";
+      const endTime = addOneHour(startTime);
+
+      return {
+        ...current,
+        timeBands: [
+          ...current.timeBands,
+          {
+            id: getNextSnapshotEntityId(current.timeBands),
+            startTime,
+            endTime,
+            orderIndex: current.timeBands.length,
+          },
+        ],
+      };
+    });
+  };
+
+  const handleDraftUpdateTimeBand = (
+    bandId: number,
+    patch: Partial<TimetableSnapshotState["timeBands"][number]>,
+  ) => {
+    mutateEditDraft((current) => ({
+      ...current,
+      timeBands: current.timeBands.map((band) => (band.id === bandId ? { ...band, ...patch } : band)),
+    }));
+  };
+
+  const handleDraftMoveTimeBand = (bandId: number, direction: -1 | 1) => {
+    mutateEditDraft((current) => {
+      const ordered = [...current.timeBands].sort(
+        (a, b) => a.orderIndex - b.orderIndex || a.id - b.id,
+      );
+      const fromIndex = ordered.findIndex((band) => band.id === bandId);
+      const toIndex = fromIndex + direction;
+
+      if (fromIndex < 0 || toIndex < 0 || toIndex >= ordered.length) {
+        return current;
+      }
+
+      const [moved] = ordered.splice(fromIndex, 1);
+
+      if (!moved) {
+        return current;
+      }
+
+      ordered.splice(toIndex, 0, moved);
+
+      return {
+        ...current,
+        timeBands: ordered.map((band, index) => ({ ...band, orderIndex: index })),
+      };
+    });
+  };
+
+  const handleDraftRemoveTimeBand = (bandId: number) => {
+    mutateEditDraft((current) => ({
+      ...current,
+      timeBands: current.timeBands.filter((band) => band.id !== bandId),
+      blocks: current.blocks.filter((block) => block.startBandId !== bandId),
+    }));
+  };
+
+  const handleDraftAddBlock = () => {
+    if (!editDraftState || draftDays.length === 0 || draftTimeBands.length === 0) {
+      setChangeError("Add at least one day and one time band before adding a block.");
+      return;
+    }
+
+    setChangeError(null);
+
+    mutateEditDraft((current) => ({
+      ...current,
+      blocks: [
+        ...current.blocks,
+        {
+          id: getNextSnapshotEntityId(current.blocks),
+          dayId: draftDays[0]!.id,
+          startBandId: draftTimeBands[0]!.id,
+          laneIndex: 0,
+          rowSpan: 1,
+          label: "L1",
+        },
+      ],
+    }));
+  };
+
+  const handleDraftUpdateBlock = (
+    blockId: number,
+    patch: Partial<TimetableSnapshotState["blocks"][number]>,
+  ) => {
+    mutateEditDraft((current) => ({
+      ...current,
+      blocks: current.blocks.map((block) => (block.id === blockId ? { ...block, ...patch } : block)),
+    }));
+  };
+
+  const handleDraftRemoveBlock = (blockId: number) => {
+    mutateEditDraft((current) => ({
+      ...current,
+      blocks: current.blocks.filter((block) => block.id !== blockId),
+    }));
+  };
+
   return (
     <section className="min-h-screen bg-gray-50">
       <div className="mb-8 px-6 py-8">
         <h2 className="text-3xl font-bold mb-2">Timetable Builder</h2>
         <p className="text-gray-600">Build slot systems with day columns, time-band rows, and merged slot blocks</p>
       </div>
+
+      <section className="mx-4 mb-6 rounded-lg border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-slate-900">Performance QoL</h3>
+          <span className="text-xs text-slate-500">Stored locally</span>
+        </div>
+        <p className="mt-1 text-xs text-slate-600">
+          Keep auto-loading disabled for lighter navigation, then explicitly load only what you need.
+        </p>
+
+        <div className="mt-3 grid gap-2 md:grid-cols-3">
+          <label className="flex items-start gap-2 rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
+            <input
+              type="checkbox"
+              checked={qolPreferences.autoLoadGridOnSystemChange}
+              onChange={(event) =>
+                setQolPreferences((current) => ({
+                  ...current,
+                  autoLoadGridOnSystemChange: event.target.checked,
+                }))
+              }
+              className="mt-0.5"
+            />
+            <span>Auto-load grid when slot system changes</span>
+          </label>
+
+          <label className="flex items-start gap-2 rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
+            <input
+              type="checkbox"
+              checked={qolPreferences.autoLoadSheetStatusOnSystemChange}
+              onChange={(event) =>
+                setQolPreferences((current) => ({
+                  ...current,
+                  autoLoadSheetStatusOnSystemChange: event.target.checked,
+                }))
+              }
+              className="mt-0.5"
+            />
+            <span>Auto-load sheet status when slot system changes</span>
+          </label>
+
+          <label className="flex items-start gap-2 rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
+            <input
+              type="checkbox"
+              checked={qolPreferences.autoLoadCurrentSheetOnSelection}
+              onChange={(event) =>
+                setQolPreferences((current) => ({
+                  ...current,
+                  autoLoadCurrentSheetOnSelection: event.target.checked,
+                }))
+              }
+              className="mt-0.5"
+            />
+            <span>Auto-load current sheet preview once a batch is selected</span>
+          </label>
+        </div>
+      </section>
 
       <div className="flex flex-col">
 
@@ -2680,7 +3274,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
               <option value="">Select a slot system</option>
               {slotSystems.map((system) => (
                 <option key={system.id} value={system.id}>
-                  {system.isLocked ? "🔒 " : ""}{system.name}
+                  {system.isLocked ? "[Locked] " : ""}{system.name}
                 </option>
               ))}
             </select>
@@ -2717,6 +3311,24 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
           >
             {loadingSystems ? "Refreshing..." : "Refresh"}
           </button>
+          {selectedSystemId !== "" && showGridSection && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => void loadGrid(selectedSystemId)}
+              disabled={loadingGrid || actionLoading}
+            >
+              {loadingGrid ? "Loading Grid..." : "Load Grid"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void handleDuplicateSlotSystem()}
+            disabled={actionLoading || selectedSystemId === ""}
+          >
+            Duplicate Slot System
+          </button>
           {isSystemLocked && (
             <button
               id="timetable-open-change-workspace"
@@ -2726,7 +3338,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
               onClick={() => void handlePreviewChanges()}
               disabled={changeLoading || actionLoading}
             >
-              {changeLoading ? "Loading..." : "✏️ Edit Structure"}
+              {changeLoading ? "Loading..." : "Edit Structure"}
             </button>
           )}
         </div>
@@ -2740,7 +3352,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
          <div
            className="bg-white rounded-lg shadow-2xl p-6 w-full max-w-md"
          >
-           <h3 className="text-lg font-bold mb-4 text-red-600">⚠️ Confirm Pruning</h3>
+             <h3 className="text-lg font-bold mb-4 text-red-600">Confirm Pruning</h3>
            <p className="text-gray-700 mb-2">
              You have enabled booking pruning. This will remove <strong>{pendingPruneBookingCount}</strong> existing booking{pendingPruneBookingCount !== 1 ? "s" : ""} that no longer fit the new slot structure.
            </p>
@@ -2769,7 +3381,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
      )}
         {isSystemLocked && (
           <div className="mt-3 p-3 rounded" style={{ backgroundColor: "#fef3cd", border: "1px solid #ffc107" }}>
-            <strong>🔒 Locked System:</strong> This slot system has been committed and is locked.
+            <strong>Locked System:</strong> This slot system has been committed and is locked.
             Direct day/band/block edits are disabled. Use <strong>"Edit Structure"</strong> to make changes through the change workspace.
           </div>
         )}
@@ -2809,7 +3421,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                 <option value="">Select a slot system</option>
                 {slotSystems.map((system) => (
                   <option key={system.id} value={system.id}>
-                    {system.isLocked ? "🔒 " : ""}
+                    {system.isLocked ? "[Locked] " : ""}
                     {system.name}
                   </option>
                 ))}
@@ -2819,21 +3431,54 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
         )}
 
         <div className="alert mb-4">
-          Single-sheet mode is active: each slot system uses one classroom allocation sheet.
-          Uploading a new file replaces older batch context for the selected slot system.
+          Each slot system has one classroom allocation sheet.
+          Uploading a new file updates the sheet for the selected slot system.
           {selectedSystemId !== "" && (
             <div className="mt-1 text-xs text-muted-foreground">
               {importBatchesLoading
-                ? "Checking active sheet context..."
-                : `Known sheets for selected slot system: ${importBatches.length}${
-                    selectedBatchId !== "" ? ` · Active batch id: ${selectedBatchId}` : ""
-                  }`}
+                ? "Checking sheet status..."
+                : !hasLoadedImportBatches
+                  ? "Sheet status not loaded yet. Click Load Sheet Status."
+                  : importBatches.length === 0
+                  ? "No sheet exists yet for the selected slot system."
+                  : `Current sheet batch: #${importBatches[0]!.batchId} · ${importBatches[0]!.status}`}
             </div>
           )}
           {previewReport && (
             <div className="mt-1 text-xs text-muted-foreground">
               Active sheet: Batch #{previewReport.batchId} · {formatDateDDMMYYYY(previewReport.termStartDate)} to {formatDateDDMMYYYY(previewReport.termEndDate)}
             </div>
+          )}
+        </div>
+
+        <div className="btn-group mb-4">
+          {selectedSystemId !== "" && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => void loadImportBatches(selectedSystemId)}
+              disabled={importBatchesLoading || importLoading}
+            >
+              {importBatchesLoading
+                ? "Loading..."
+                : hasLoadedImportBatches
+                  ? "Refresh Sheet Status"
+                  : "Load Sheet Status"}
+            </button>
+          )}
+          {selectedBatchId !== "" && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => void handleLoadImportBatch(selectedBatchId)}
+              disabled={importLoading}
+            >
+              {importLoading
+                ? "Loading..."
+                : previewReport?.batchId === selectedBatchId
+                  ? "Reload Current Sheet"
+                  : "Load Current Sheet"}
+            </button>
           )}
         </div>
 
@@ -2855,58 +3500,10 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
           </div>
         )}
 
-        <div className="form-row">
-          <div className="form-field">
-            <label htmlFor="batchSelect">Load existing batch</label>
-            <select
-              id="batchSelect"
-              className="input"
-              value={selectedBatchId}
-              onChange={(e) => {
-                const value = e.target.value;
-                setSelectedBatchId(value === "" ? "" : Number(value));
-              }}
-              disabled={importBatchesLoading || importLoading}
-            >
-              <option value="">Select batch</option>
-              {importBatches.map((batch) => (
-                <option key={batch.batchId} value={batch.batchId}>
-                  #{batch.batchId} · {batch.status}
-                </option>
-              ))}
-            </select>
+        {!importBatchesLoading && hasLoadedImportBatches && importBatches.length === 0 && (
+          <div className="empty-text mt-2">
+            No allocation sheet found for this slot system yet.
           </div>
-          <div className="form-field">
-            <label>Batch actions</label>
-            <div className="btn-group">
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => {
-                  if (selectedBatchId !== "") {
-                    void handleLoadImportBatch(selectedBatchId);
-                  }
-                }}
-                disabled={selectedBatchId === "" || importLoading}
-              >
-                {importLoading ? "Loading..." : "Load Selected Batch"}
-              </button>
-              {selectedSystemId !== "" && (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => void loadImportBatches(selectedSystemId)}
-                  disabled={importBatchesLoading || importLoading}
-                >
-                  {importBatchesLoading ? "Refreshing..." : "Refresh Batches"}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {!importBatchesLoading && importBatches.length === 0 && (
-          <div className="empty-text mt-2">No imported batches found for the selected slot system yet.</div>
         )}
 
         {importBatchesError && (
@@ -3434,7 +4031,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
         </>
         )}
 
-        {showProcessedSection && (processedRowsLoading || processedRowsError || processedRowsReport) && (
+        {showProcessedSection && (view === "processed" || view === "all" || processedRowsLoading || processedRowsError || processedRowsReport) && (
           <div id="timetable-processed-section" className="mt-4">
             <div className="card-header mb-2">
               <h3>Processed Rows And Booking CRUD</h3>
@@ -3444,6 +4041,29 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                 </span>
               )}
             </div>
+
+            <div className="alert mb-4">
+              Processed rows are loaded on demand for better performance.
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                style={{ marginLeft: "var(--space-2)" }}
+                onClick={() => void handleLoadProcessedRowsForActiveBatch()}
+                disabled={processedRowsLoading || !canLoadProcessedRows}
+              >
+                {processedRowsLoading
+                  ? "Loading..."
+                  : isProcessedRowsLoadedForActiveBatch
+                    ? "Reload Processed Rows"
+                    : "Load Processed Rows"}
+              </button>
+            </div>
+
+            {!canLoadProcessedRows && (
+              <p className="empty-text mb-4">
+                Load sheet status and then load the current sheet before loading processed rows.
+              </p>
+            )}
 
             {processedRowsLoading && (
               <p className="loading-text">Loading processed rows...</p>
@@ -3829,6 +4449,21 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
           <p className="loading-text">Loading timetable grid...</p>
         )}
 
+        {selectedSystemId !== "" && !loadingGrid && !grid && (
+          <div className="alert mt-4">
+            Grid data is not loaded yet.
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: "var(--space-2)" }}
+              onClick={() => void loadGrid(selectedSystemId)}
+              disabled={loadingGrid || actionLoading}
+            >
+              {loadingGrid ? "Loading..." : "Load Grid"}
+            </button>
+          </div>
+        )}
+
         {selectedSystemId !== "" && !loadingGrid && grid && days.length === 0 && (
           <p className="empty-text">No days yet. Add at least one day to build the grid.</p>
         )}
@@ -3887,7 +4522,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                             title="Delete day"
                             aria-label={`Delete ${DAY_LABELS[day.dayOfWeek]}`}
                           >
-                            ×
+                            x
                           </button>
                         </div>
                       </div>
@@ -4108,6 +4743,14 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
               </button>
               <button
                 type="button"
+                className="btn"
+                onClick={() => void handleDuplicateSlotSystem()}
+                disabled={actionLoading || selectedSystemId === ""}
+              >
+                Duplicate Slot System
+              </button>
+              <button
+                type="button"
                 className="btn btn-danger"
                 onClick={() => void handleDeleteSlotSystem()}
                 disabled={actionLoading || selectedSystemId === ""}
@@ -4145,7 +4788,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
           className="fixed top-0 left-0 right-0 z-40 p-3 text-center text-white"
           style={{ backgroundColor: "#dc3545" }}
         >
-          ⚠️ <strong>Booking Freeze Active:</strong> Commit session is currently frozen for final validation.
+          <strong>Booking Freeze Active:</strong> Commit session is currently frozen for final validation.
           New booking operations are blocked until commit completes or is cancelled.
         </div>
       )}
@@ -4161,7 +4804,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
             id="conflictResolutionDialog"
           >
             <h3 className="text-xl font-bold mb-4">
-              ⚠️ {toCommitStageLabel(conflictStage ?? "runtime")} Conflicts ({conflictReport.conflictCount})
+              {toCommitStageLabel(conflictStage ?? "runtime")} Conflicts ({conflictReport.conflictCount})
             </h3>
             <p className="text-gray-600 mb-4">
               {conflictStage === "runtime"
@@ -4217,7 +4860,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                       Affected Row: #{conflict.rowIndex} ·
                       {" "}
                       Requested Slot - Room: {conflictRoomLabel},{" "}
-                      {new Date(conflict.startAt).toLocaleString()} → {new Date(conflict.endAt).toLocaleString()}
+                      {formatDateTimeDDMMYYYY(conflict.startAt)} → {formatDateTimeDDMMYYYY(conflict.endAt)}
                     </div>
                     <div className="text-sm text-gray-500 mb-2">
                       {conflict.reason}
@@ -4226,8 +4869,8 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                     </div>
                     {conflictingStartAt && conflictingEndAt && (
                       <div className="text-xs text-gray-500 mb-3">
-                        Existing overlap window: {new Date(conflictingStartAt).toLocaleString()} →{" "}
-                        {new Date(conflictingEndAt).toLocaleString()}
+                        Existing overlap window: {formatDateTimeDDMMYYYY(conflictingStartAt)} →{" "}
+                        {formatDateTimeDDMMYYYY(conflictingEndAt)}
                       </div>
                     )}
 
@@ -4569,7 +5212,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
             className="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl max-h-[80vh] overflow-y-auto"
             id="changeWorkspacePanel"
           >
-            <h3 className="text-xl font-bold mb-4">✏️ Slot System Change Workspace</h3>
+            <h3 className="text-xl font-bold mb-4">Slot System Change Workspace</h3>
                        {editSessionStatus !== "VIEW" && (
                          <div className="p-3 rounded mb-4 text-sm" style={{ backgroundColor: "#e3f2fd", color: "#1565c0" }}>
                            <strong>Status:</strong> Edit in progress · {editSessionStatus === "EDITING" ? "Running conflict checks" : "Finalizing changes"}
@@ -4611,7 +5254,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                 {changePreview.warnings.length > 0 && (
                   <div className="mt-2">
                     {changePreview.warnings.map((w, i) => (
-                      <p key={i} className="text-sm text-amber-600">⚠️ {w}</p>
+                      <p key={i} className="text-sm text-amber-600">Warning: {w}</p>
                     ))}
                   </div>
                 )}
@@ -4623,18 +5266,273 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
             </div>
 
             <div className="mb-4">
-              <label className="block text-sm font-medium mb-2" htmlFor="editDraftJson">
-                Proposed Snapshot (JSON)
-              </label>
-              <textarea
-                id="editDraftJson"
-                className="input"
-                rows={10}
-                value={editDraftJson}
-                onChange={(event) => setEditDraftJson(event.target.value)}
-                placeholder="Paste or edit snapshot JSON..."
-                disabled={editStartLoading}
-              />
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <label className="block text-sm font-medium">Draft Structure Editor</label>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => resetEditDraftFromGrid()}
+                  disabled={editStartLoading}
+                >
+                  Reset Draft
+                </button>
+              </div>
+              <p className="mb-3 text-xs text-gray-500">
+                Edit the locked slot-system structure here, then run the same staged commit pipeline.
+              </p>
+
+              {editDraftState ? (
+                <div className="space-y-4">
+                  <div className="rounded border p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h4 className="text-sm font-semibold">Days</h4>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => handleDraftAddDay()}
+                        disabled={editStartLoading}
+                      >
+                        Add Day
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {draftDays.length === 0 && (
+                        <p className="text-xs text-gray-500">No days in draft.</p>
+                      )}
+                      {draftDays.map((day, index) => (
+                        <div key={day.id} className="grid gap-2 sm:grid-cols-3 items-center">
+                          <select
+                            className="input"
+                            value={day.dayOfWeek}
+                            onChange={(event) =>
+                              handleDraftUpdateDay(day.id, {
+                                dayOfWeek: event.target.value as DayOfWeek,
+                              })
+                            }
+                            disabled={editStartLoading}
+                          >
+                            {DAY_OF_WEEK_OPTIONS.map((dayOfWeek) => (
+                              <option key={dayOfWeek} value={dayOfWeek}>
+                                {DAY_LABELS[dayOfWeek]}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            className="input"
+                            type="number"
+                            min={1}
+                            value={day.laneCount}
+                            onChange={(event) =>
+                              handleDraftUpdateDay(day.id, {
+                                laneCount: Math.max(1, Number(event.target.value) || 1),
+                              })
+                            }
+                            disabled={editStartLoading}
+                          />
+                          <div className="flex gap-1 justify-end">
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => handleDraftMoveDay(day.id, -1)}
+                              disabled={editStartLoading || index === 0}
+                            >
+                              Up
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => handleDraftMoveDay(day.id, 1)}
+                              disabled={editStartLoading || index === draftDays.length - 1}
+                            >
+                              Down
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              onClick={() => handleDraftRemoveDay(day.id)}
+                              disabled={editStartLoading}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded border p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h4 className="text-sm font-semibold">Time Bands</h4>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => handleDraftAddTimeBand()}
+                        disabled={editStartLoading}
+                      >
+                        Add Time Band
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {draftTimeBands.length === 0 && (
+                        <p className="text-xs text-gray-500">No time bands in draft.</p>
+                      )}
+                      {draftTimeBands.map((band, index) => (
+                        <div key={band.id} className="grid gap-2 sm:grid-cols-3 items-center">
+                          <DateInput
+                            mode="time"
+                            value={toTimeLabel(band.startTime)}
+                            onChange={(value) =>
+                              handleDraftUpdateTimeBand(band.id, {
+                                startTime: value,
+                              })
+                            }
+                            disabled={editStartLoading}
+                          />
+                          <DateInput
+                            mode="time"
+                            value={toTimeLabel(band.endTime)}
+                            onChange={(value) =>
+                              handleDraftUpdateTimeBand(band.id, {
+                                endTime: value,
+                              })
+                            }
+                            disabled={editStartLoading}
+                          />
+                          <div className="flex gap-1 justify-end">
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => handleDraftMoveTimeBand(band.id, -1)}
+                              disabled={editStartLoading || index === 0}
+                            >
+                              Up
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => handleDraftMoveTimeBand(band.id, 1)}
+                              disabled={editStartLoading || index === draftTimeBands.length - 1}
+                            >
+                              Down
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              onClick={() => handleDraftRemoveTimeBand(band.id)}
+                              disabled={editStartLoading}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded border p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h4 className="text-sm font-semibold">Blocks</h4>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => handleDraftAddBlock()}
+                        disabled={editStartLoading || draftDays.length === 0 || draftTimeBands.length === 0}
+                      >
+                        Add Block
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {draftBlocks.length === 0 && (
+                        <p className="text-xs text-gray-500">No blocks in draft.</p>
+                      )}
+                      {draftBlocks.map((block) => (
+                        <div key={block.id} className="grid gap-2 sm:grid-cols-6 items-center">
+                          <input
+                            className="input"
+                            type="text"
+                            value={block.label}
+                            onChange={(event) =>
+                              handleDraftUpdateBlock(block.id, {
+                                label: event.target.value,
+                              })
+                            }
+                            placeholder="Label"
+                            disabled={editStartLoading}
+                          />
+                          <select
+                            className="input"
+                            value={block.dayId}
+                            onChange={(event) =>
+                              handleDraftUpdateBlock(block.id, {
+                                dayId: Number(event.target.value),
+                              })
+                            }
+                            disabled={editStartLoading}
+                          >
+                            {draftDays.map((day) => (
+                              <option key={day.id} value={day.id}>
+                                {DAY_LABELS[day.dayOfWeek]}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            className="input"
+                            value={block.startBandId}
+                            onChange={(event) =>
+                              handleDraftUpdateBlock(block.id, {
+                                startBandId: Number(event.target.value),
+                              })
+                            }
+                            disabled={editStartLoading}
+                          >
+                            {draftTimeBands.map((band) => (
+                              <option key={band.id} value={band.id}>
+                                {toTimeLabel(band.startTime)} - {toTimeLabel(band.endTime)}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            className="input"
+                            type="number"
+                            min={0}
+                            value={block.laneIndex}
+                            onChange={(event) =>
+                              handleDraftUpdateBlock(block.id, {
+                                laneIndex: Math.max(0, Number(event.target.value) || 0),
+                              })
+                            }
+                            disabled={editStartLoading}
+                          />
+                          <input
+                            className="input"
+                            type="number"
+                            min={1}
+                            value={block.rowSpan}
+                            onChange={(event) =>
+                              handleDraftUpdateBlock(block.id, {
+                                rowSpan: Math.max(1, Number(event.target.value) || 1),
+                              })
+                            }
+                            disabled={editStartLoading}
+                          />
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            onClick={() => handleDraftRemoveBlock(block.id)}
+                            disabled={editStartLoading}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">
+                  Draft is not available. Close this panel and reopen Edit Structure.
+                </p>
+              )}
             </div>
 
             <label className="flex items-center gap-2 text-sm mb-4">
@@ -4712,7 +5610,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                   setChangeError(null);
                   setChangeSuccess(null);
                   setEditStartResult(null);
-                  setEditDraftJson("");
+                  setEditDraftState(null);
                 }}
               >
                 Close

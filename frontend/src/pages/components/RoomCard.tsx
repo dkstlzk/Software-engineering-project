@@ -92,11 +92,11 @@ export function RoomCard({ room, onEditClick, userRole, canEdit: canEditProp }: 
         <div className="flex items-center gap-3 text-gray-600">
           <span className={room.hasProjector ? "text-green-600" : "text-gray-400"}>
             <Projector className="h-4 w-4 inline mr-1" />
-            {room.hasProjector ? "✓" : "✗"}
+            {room.hasProjector ? "Available" : "Not available"}
           </span>
           <span className={room.hasMic ? "text-green-600" : "text-gray-400"}>
             <Mic className="h-4 w-4 inline mr-1" />
-            {room.hasMic ? "✓" : "✗"}
+            {room.hasMic ? "Available" : "Not available"}
           </span>
         </div>
 
