@@ -5,6 +5,7 @@ import { availabilitySchema } from '../../../shared/validators/schemas/availabil
 import { getAssignedBuildingIdsForStaff } from "../../users/services/staffBuildingScope";
 import { getAvailabilityWithBookingsAndRbac, getBuildingMatrixAvailability, BuildingWithRooms } from '../../../data/queries/availability.queries';
 import logger from "../../../shared/utils/logger";
+import { toISTDateKey, toISTTimeKey } from "../../../shared/utils/istDateTime";
 
 const router = Router();
 
@@ -65,9 +66,14 @@ router.get(
           return;
         }
 
-        const startTime = startAt.toTimeString().slice(0, 5) as string;
-        const endTime = endAt.toTimeString().slice(0, 5) as string;
-        const date = startAt.toISOString().split('T')[0] as string;
+        const startTime = toISTTimeKey(startAt);
+        const endTime = toISTTimeKey(endAt);
+        const date = toISTDateKey(startAt);
+
+        if (!startTime || !endTime || !date) {
+          res.status(400).json({ message: 'Invalid startAt or endAt' });
+          return;
+        }
 
         const matrixData = await getBuildingMatrixAvailability(
           buildingId,

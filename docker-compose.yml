@@ -3,10 +3,13 @@ services:
     image: postgres:17-alpine
     container_name: ura_postgres
     restart: unless-stopped
+    command: ["postgres", "-c", "timezone=Asia/Kolkata"]
     environment:
       POSTGRES_USER: ura_user
       POSTGRES_PASSWORD: ura_pass
       POSTGRES_DB: ura_system
+      TZ: Asia/Kolkata
+      PGTZ: Asia/Kolkata
     ports:
       - "5433:5432"
     volumes:
@@ -45,7 +48,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://ura_user:ura_pass@db:5432/ura_system
-    command: ["npm", "run", "db:push:first-deploy"]
+    command: ["npm", "run", "db:deploy"]
 
   backend:
     build:
@@ -62,6 +65,7 @@ services:
         condition: service_completed_successfully
     environment:
       NODE_ENV: production
+      TZ: Asia/Kolkata
       PORT: 5000
       DATABASE_URL: postgres://ura_user:ura_pass@db:5432/ura_system
       REDIS_URL: redis://redis:6379
@@ -78,6 +82,8 @@ services:
       dockerfile: frontend/Dockerfile
     container_name: ura_frontend
     restart: unless-stopped
+    environment:
+      TZ: Asia/Kolkata
     depends_on:
       - backend
     ports:

@@ -28,21 +28,38 @@ function resolveDrizzleKitCommand() {
   return resolved;
 }
 
+function runDrizzleKit(args) {
+  const command = resolveDrizzleKitCommand();
+  const result = spawnSync(command, args, {
+    stdio: "inherit",
+    env: process.env,
+  });
+
+  if (result.error) {
+    throw new Error(result.error.message);
+  }
+
+  const status = result.status ?? 1;
+
+  if (status !== 0) {
+    process.exit(status);
+  }
+}
+
 async function hasUserTables(databaseUrl) {
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
 
   try {
-    const query = `
+    const result = await client.query(`
       SELECT EXISTS (
         SELECT 1
         FROM information_schema.tables
         WHERE table_schema = 'public'
           AND table_type = 'BASE TABLE'
       ) AS has_tables;
-    `;
+    `);
 
-    const result = await client.query(query);
     return Boolean(result.rows[0]?.has_tables);
   } finally {
     await client.end();
@@ -86,11 +103,11 @@ function readLatestMigrationMetadata() {
   };
 }
 
-async function baselineLatestMigration(databaseUrl) {
+async function ensureMigrationBaselineIfMissing(databaseUrl) {
   const latest = readLatestMigrationMetadata();
 
   if (!latest) {
-    return;
+    return false;
   }
 
   const client = new Client({ connectionString: databaseUrl });
@@ -111,7 +128,7 @@ async function baselineLatestMigration(databaseUrl) {
     );
 
     if (lastApplied.rows.length > 0) {
-      return;
+      return false;
     }
 
     await client.query(
@@ -120,8 +137,10 @@ async function baselineLatestMigration(databaseUrl) {
     );
 
     console.log(
-      `Stored migration baseline at ${latest.tag}; future deployments can run drizzle migrate safely.`,
+      `No drizzle migration metadata found. Baseline set at ${latest.tag}.`,
     );
+
+    return true;
   } finally {
     await client.end();
   }
@@ -131,37 +150,22 @@ async function main() {
   const databaseUrl = process.env.DATABASE_URL;
 
   if (!databaseUrl) {
-    console.error("DATABASE_URL is required for first-deploy schema sync");
+    console.error("DATABASE_URL is required for schema deployment");
     process.exit(1);
   }
 
   const nonEmptySchema = await hasUserTables(databaseUrl);
 
-  if (nonEmptySchema) {
-    console.log("Detected existing tables in public schema; skipping forced db push.");
-    process.exit(0);
+  if (!nonEmptySchema) {
+    console.log("Public schema is empty; running first-deploy push workflow.");
+    runDrizzleKit(["push", "--force"]);
+    await ensureMigrationBaselineIfMissing(databaseUrl);
+    return;
   }
 
-  console.log("Public schema is empty; running drizzle-kit push --force for first deployment.");
-
-  const command = resolveDrizzleKitCommand();
-  const result = spawnSync(command, ["push", "--force"], {
-    stdio: "inherit",
-    env: process.env,
-  });
-
-  if (result.error) {
-    console.error(result.error.message);
-    process.exit(1);
-  }
-
-  if ((result.status ?? 1) !== 0) {
-    process.exit(result.status ?? 1);
-  }
-
-  await baselineLatestMigration(databaseUrl);
-
-  process.exit(result.status ?? 1);
+  await ensureMigrationBaselineIfMissing(databaseUrl);
+  console.log("Existing schema detected; running drizzle-kit migrate.");
+  runDrizzleKit(["migrate"]);
 }
 
 main().catch((error) => {

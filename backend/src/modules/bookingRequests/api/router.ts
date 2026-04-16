@@ -6,6 +6,11 @@ import { authMiddleware } from "../../../middleware/auth";
 import { requireRole } from "../../../middleware/rbac";
 import { requireBookingsUnfrozen } from "../../../middleware/bookingFreeze";
 import { createBooking, hasBookingOverlap } from "../../bookings/services/bookingService";
+import {
+  buildHolidayWarningPayload,
+  getOverlappingHolidaysForInterval,
+  isHolidayOverrideAccepted,
+} from "../../holidays/service";
 import { getAssignedBuildingIdsForStaff } from "../../users/services/staffBuildingScope";
 import {
   getActiveAdminIds,
@@ -14,6 +19,7 @@ import {
   type NotificationDraft,
 } from "../../notifications/services/notificationService";
 import logger from "../../../shared/utils/logger";
+import { formatISTDateTime } from "../../../shared/utils/istDateTime";
 
 const router = Router();
 
@@ -61,6 +67,7 @@ type PgCauseError = {
   };
 };
 
+type UserRole = "ADMIN" | "STAFF" | "FACULTY" | "STUDENT" | "PENDING_ROLE";
 type ChangeCapableRole = "ADMIN" | "STAFF" | "FACULTY" | "STUDENT";
 
 async function getRequestWithBuilding(requestId: number) {
@@ -118,7 +125,7 @@ function canViewRequest(
 }
 
 function formatDateTimeForNotification(value: Date): string {
-  return value.toISOString().replace("T", " ").slice(0, 16);
+  return formatISTDateTime(value);
 }
 
 function formatRequestWindow(startAt: Date, endAt: Date): string {
@@ -226,20 +233,46 @@ function canApplyDirectChangeToRequest(
     facultyId: number | null;
     status: BookingRequestStatus;
   },
+  requestOwnerRole: UserRole | null,
 ): boolean {
-  if (request.status !== "PENDING_FACULTY") {
+  if (request.status === "APPROVED") {
     return false;
+  }
+
+  if (request.status === "PENDING_STAFF") {
+    // Student-origin requests in PENDING_STAFF are forwarded by faculty and must go through approval.
+    if (requestOwnerRole === null || requestOwnerRole === "STUDENT") {
+      return false;
+    }
+  }
+
+  if (request.status !== "PENDING_FACULTY" && request.status !== "PENDING_STAFF") {
+    return false;
+  }
+
+  if (role === "ADMIN" || role === "STAFF") {
+    return true;
   }
 
   if (role === "STUDENT") {
     return request.userId === userId;
   }
 
-  if (role === "FACULTY") {
-    return request.userId === userId || request.facultyId === userId;
+  return request.userId === userId || request.facultyId === userId;
+}
+
+async function getUserRoleById(userId: number | null): Promise<UserRole | null> {
+  if (userId === null) {
+    return null;
   }
 
-  return false;
+  const rows = await db
+    .select({ role: users.role })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  return rows[0]?.role ?? null;
 }
 
 async function isActiveFacultyUser(userId: number): Promise<boolean> {
@@ -562,7 +595,7 @@ router.post("/:id/reject", authMiddleware, requireRole(["FACULTY", "STAFF"]), re
   }
 });
 
-router.post("/:id/approve", authMiddleware, requireRole("STAFF"), requireBookingsUnfrozen(), async (req, res) => {
+router.post("/:id/approve", authMiddleware, requireRole(["STAFF", "ADMIN"]), requireBookingsUnfrozen(), async (req, res) => {
   const id = Number(req.params.id);
   const courseIdRaw = req.body?.courseId;
   const hasCourseId =
@@ -587,13 +620,27 @@ router.post("/:id/approve", authMiddleware, requireRole("STAFF"), requireBooking
       return res.status(404).json({ message: "Request not found" });
     }
 
-    const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user!.id);
+    if (req.user!.role === "STAFF") {
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user!.id);
+
+      if (
+        assignedBuildingIds.length === 0 ||
+        !assignedBuildingIds.includes(scopeRow.buildingId)
+      ) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+    }
+
+    const approvalHolidays = await getOverlappingHolidaysForInterval(
+      new Date(scopeRow.request.startAt),
+      new Date(scopeRow.request.endAt),
+    );
 
     if (
-      assignedBuildingIds.length === 0 ||
-      !assignedBuildingIds.includes(scopeRow.buildingId)
+      approvalHolidays.length > 0 &&
+      !isHolidayOverrideAccepted(req.body?.overrideHolidayWarning)
     ) {
-      return res.status(403).json({ message: "Forbidden" });
+      return res.status(409).json(buildHolidayWarningPayload(approvalHolidays));
     }
 
     const approvalResult = await db.transaction(async (tx) => {
@@ -1094,6 +1141,15 @@ router.post(
         });
       }
 
+      const changeHolidays = await getOverlappingHolidaysForInterval(start, end);
+
+      if (
+        changeHolidays.length > 0 &&
+        !isHolidayOverrideAccepted(req.body?.overrideHolidayWarning)
+      ) {
+        return res.status(409).json(buildHolidayWarningPayload(changeHolidays));
+      }
+
       const eventTypeRaw = req.body?.eventType;
       let eventTypeOverride: BookingEventType | null = null;
 
@@ -1214,6 +1270,9 @@ router.post(
         });
       }
 
+      const sourceContextRequest = sourceRequest ?? bookingLinkedRequest;
+      const sourceOwnerRole = await getUserRoleById(sourceContextRequest?.userId ?? null);
+
       const pendingConditions = [
         eq(bookingRequests.userId, actorId),
         eq(bookingRequests.roomId, roomId),
@@ -1243,7 +1302,7 @@ router.post(
 
       if (
         sourceRequest &&
-        canApplyDirectChangeToRequest(actorRole, actorId, sourceRequest)
+        canApplyDirectChangeToRequest(actorRole, actorId, sourceRequest, sourceOwnerRole)
       ) {
         const updatedRows = await db
           .update(bookingRequests)
@@ -1259,7 +1318,10 @@ router.post(
           .where(
             and(
               eq(bookingRequests.id, sourceRequest.id),
-              eq(bookingRequests.status, "PENDING_FACULTY"),
+              or(
+                eq(bookingRequests.status, "PENDING_FACULTY"),
+                eq(bookingRequests.status, "PENDING_STAFF"),
+              ),
             ),
           )
           .returning();
@@ -1278,6 +1340,8 @@ router.post(
         });
       }
 
+      // Student-origin edits that cannot be directly applied should go back
+      // to faculty review first; faculty/staff/admin changes proceed to staff review.
       const targetStatus = actorRole === "STUDENT" ? "PENDING_FACULTY" : "PENDING_STAFF";
 
       const created = await createBookingRequestWithNotifications({
@@ -1311,7 +1375,7 @@ router.post(
   },
 );
 
-router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req, res) => {
+router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY", "STAFF"]), async (req, res) => {
   try {
     const roomId = Number(req.body?.roomId);
     const startAt = req.body?.startAt;
@@ -1387,11 +1451,31 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
       return res.status(404).json({ message: "Room not found" });
     }
 
+    if (req.user!.role === "STAFF") {
+      const assignedBuildingIds = await getAssignedBuildingIdsForStaff(req.user!.id);
+
+      if (
+        assignedBuildingIds.length === 0 ||
+        !assignedBuildingIds.includes(room.buildingId)
+      ) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+    }
+
     // Block booking requests for inaccessible rooms
     if (room.accessible === false) {
       return res.status(400).json({
         message: "This room is currently not accessible and cannot accept bookings",
       });
+    }
+
+    const createHolidays = await getOverlappingHolidaysForInterval(start, end);
+
+    if (
+      createHolidays.length > 0 &&
+      !isHolidayOverrideAccepted(req.body?.overrideHolidayWarning)
+    ) {
+      return res.status(409).json(buildHolidayWarningPayload(createHolidays));
     }
 
     let facultyId: number | null = null;
@@ -1418,8 +1502,10 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
       }
 
       facultyId = selectedFacultyId;
-    } else {
+    } else if (req.user!.role === "FACULTY") {
       facultyId = req.user!.id;
+    } else {
+      facultyId = null;
     }
 
     /**
@@ -1479,7 +1565,8 @@ router.post("/", authMiddleware, requireRole(["STUDENT", "FACULTY"]), async (req
         eventType,
         purpose,
         participantCount,
-        status: req.user!.role === "STUDENT" ? "PENDING_FACULTY" : "PENDING_STAFF",
+        status:
+          req.user!.role === "STUDENT" ? "PENDING_FACULTY" : "PENDING_STAFF",
       })
       .returning();
 

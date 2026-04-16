@@ -1,5 +1,5 @@
 import { db } from "../db";
-import { bookingCourseLink, bookingEditRequests, bookingRequests, bookings } from "../db/schema";
+import { bookingCourseLink, bookingEditRequests, bookingRequests, bookings, users } from "../db/schema";
 import { and, eq } from "drizzle-orm";
 import {
   checkBookingConflict,
@@ -22,6 +22,7 @@ type BookingContext = {
   startAt: Date;
   endAt: Date;
   requestStatus: "PENDING_FACULTY" | "PENDING_STAFF" | "APPROVED" | "REJECTED" | "CANCELLED" | null;
+  requestUserRole: "ADMIN" | "STAFF" | "FACULTY" | "STUDENT" | "PENDING_ROLE" | null;
 };
 
 export type EditChangesInput = {
@@ -68,20 +69,27 @@ function parseOptionalDate(value: string | Date | undefined, field: string): Dat
 }
 
 export function decideEditFlow(user: UserContext, booking: BookingContext): EditFlow {
+  if (booking.requestStatus === "REJECTED" || booking.requestStatus === "CANCELLED") {
+    throw new Error("BOOKING_NOT_EDITABLE");
+  }
+
   if (user.role === "ADMIN" || user.role === "STAFF") {
     return "DIRECT_EDIT";
   }
 
-  if (booking.requestStatus === "PENDING_FACULTY") {
-    return "DIRECT_EDIT";
-  }
+  const isForwardedStudentBooking =
+    booking.requestStatus === "PENDING_STAFF" &&
+    (booking.requestUserRole === "STUDENT" || booking.requestUserRole === null);
 
-  if (booking.requestStatus === "PENDING_STAFF" || booking.requestStatus === "APPROVED") {
+  if (booking.requestStatus === "APPROVED" || isForwardedStudentBooking) {
     return "REQUEST_EDIT";
   }
 
-  if (booking.requestStatus === "REJECTED" || booking.requestStatus === "CANCELLED") {
-    throw new Error("BOOKING_NOT_EDITABLE");
+  if (
+    booking.requestStatus === "PENDING_FACULTY" ||
+    (booking.requestStatus === "PENDING_STAFF" && booking.requestUserRole !== "STUDENT")
+  ) {
+    return "DIRECT_EDIT";
   }
 
   return "REQUEST_EDIT";
@@ -224,9 +232,11 @@ export async function getBookingForEdit(bookingId: number) {
       requestStatus: bookingRequests.status,
       requestUserId: bookingRequests.userId,
       requestFacultyId: bookingRequests.facultyId,
+      requestUserRole: users.role,
     })
     .from(bookings)
     .leftJoin(bookingRequests, eq(bookings.requestId, bookingRequests.id))
+    .leftJoin(users, eq(bookingRequests.userId, users.id))
     .where(eq(bookings.id, bookingId))
     .limit(1);
 
