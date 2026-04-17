@@ -773,9 +773,19 @@ export async function handleGetFreezeStatus(req: Request, res: Response) {
 export async function handleStartCommitSession(req: Request, res: Response) {
   try {
     const batchId = parsePositiveInteger(req.body?.batchId);
+    const allowCommittedBatch = req.body?.allowCommittedBatch === true;
+    const targetRowIds = Array.isArray(req.body?.targetRowIds)
+      ? req.body.targetRowIds
+          .map((value: unknown) => Number(value))
+          .filter((rowId: number) => Number.isInteger(rowId) && rowId > 0)
+      : [];
 
     if (!batchId) {
       return res.status(400).json({ error: "batchId is required" });
+    }
+
+    if (allowCommittedBatch && targetRowIds.length === 0) {
+      return res.status(400).json({ error: "targetRowIds is required for committed-batch reallocation" });
     }
 
     const userId = req.user?.id;
@@ -788,6 +798,8 @@ export async function handleStartCommitSession(req: Request, res: Response) {
       batchId,
       userId,
       decisions: req.body?.decisions,
+      allowCommittedBatch,
+      ...(allowCommittedBatch && targetRowIds.length > 0 ? { targetRowIds } : {}),
     });
 
     return res.status(201).json(session);

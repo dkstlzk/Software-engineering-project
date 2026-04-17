@@ -1,10 +1,11 @@
-import { and, asc, eq, gt, gte, lt, lte } from "drizzle-orm";
+import { and, asc, eq, gt, gte, inArray, like, lt, lte } from "drizzle-orm";
 import { db } from "../../db";
 import {
   bookings,
   holidays,
   timetableDayOverrides,
   timetableImportBatches,
+  timetableImportOccurrences,
 } from "../../db/schema";
 import {
   getISTInclusiveDateRangeForInterval,
@@ -253,15 +254,55 @@ export async function pruneTimetableBookingsForHolidayRange(
     return 0;
   }
 
+  const overlapWhere = and(
+    lt(bookings.startAt, bounds.endAtExclusive),
+    gt(bookings.endAt, bounds.startAt),
+  );
+
+  const [sourceTaggedRows, linkedOccurrenceRows, sourceRefRows] = await Promise.all([
+    executor
+      .select({ id: bookings.id })
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.source, "TIMETABLE_ALLOCATION"),
+          overlapWhere,
+        ),
+      ),
+    executor
+      .select({ id: bookings.id })
+      .from(bookings)
+      .innerJoin(
+        timetableImportOccurrences,
+        eq(timetableImportOccurrences.bookingId, bookings.id),
+      )
+      .where(overlapWhere),
+    executor
+      .select({ id: bookings.id })
+      .from(bookings)
+      .where(
+        and(
+          overlapWhere,
+          like(bookings.sourceRef, "batch:%:row:%"),
+        ),
+      ),
+  ]);
+
+  const bookingIds = Array.from(
+    new Set([
+      ...sourceTaggedRows.map((row) => row.id),
+      ...linkedOccurrenceRows.map((row) => row.id),
+      ...sourceRefRows.map((row) => row.id),
+    ]),
+  );
+
+  if (bookingIds.length === 0) {
+    return 0;
+  }
+
   const deleted = await executor
     .delete(bookings)
-    .where(
-      and(
-        eq(bookings.source, "TIMETABLE_ALLOCATION"),
-        lt(bookings.startAt, bounds.endAtExclusive),
-        gt(bookings.endAt, bounds.startAt),
-      ),
-    )
+    .where(inArray(bookings.id, bookingIds))
     .returning({ id: bookings.id });
 
   return deleted.length;

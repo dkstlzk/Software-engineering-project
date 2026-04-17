@@ -289,12 +289,20 @@ export async function getTimetableImportProcessedRows(
 export async function startCommitSession(
   batchId: number,
   decisions: TimetableImportCommitDecision[],
+  options?: {
+    allowCommittedBatch?: boolean;
+    targetRowIds?: number[];
+  },
 ): Promise<CommitSessionSummary> {
   return request<CommitSessionSummary>("/timetable/commit/start", {
     method: "POST",
     body: JSON.stringify({
       batchId,
       decisions,
+      ...(options?.allowCommittedBatch === true ? { allowCommittedBatch: true } : {}),
+      ...(Array.isArray(options?.targetRowIds) && options.targetRowIds.length > 0
+        ? { targetRowIds: options.targetRowIds }
+        : {}),
     }),
   });
 }

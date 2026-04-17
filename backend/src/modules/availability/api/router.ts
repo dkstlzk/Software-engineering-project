@@ -33,8 +33,13 @@ router.get(
     const format = (req.query.format as string) || 'list';
     const slotDuration = parseInt((req.query.slotDuration as string) || '60', 10);
 
-    if (!startAt || !endAt || startAt.getTime() >= endAt.getTime()) {
-      res.status(400).json({ message: 'Invalid startAt or endAt' });
+    if (!startAt || !endAt) {
+      res.status(400).json({ message: 'startAt and endAt must be valid datetime values' });
+      return;
+    }
+
+    if (startAt.getTime() >= endAt.getTime()) {
+      res.status(400).json({ message: 'startAt must be before endAt' });
       return;
     }
 
@@ -71,7 +76,7 @@ router.get(
         const date = toISTDateKey(startAt);
 
         if (!startTime || !endTime || !date) {
-          res.status(400).json({ message: 'Invalid startAt or endAt' });
+          res.status(400).json({ message: 'startAt and endAt must be valid datetime values' });
           return;
         }
 

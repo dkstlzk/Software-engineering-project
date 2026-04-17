@@ -9,7 +9,10 @@ import {
   timetableImportRowResolutions,
   timetableImportRows,
 } from "../../db/schema";
-import { saveTimetableImportDecisions } from "./importService";
+import {
+  resetCommittedBatchRowsForReallocation,
+  saveTimetableImportDecisions,
+} from "./importService";
 import { slotBlocks, slotDays, slotSystems, slotTimeBands } from "./schema";
 import {
   computeTimetableDiff,
@@ -597,19 +600,54 @@ async function getExistingRowBookings(batchId: number, rowId: number): Promise<
     endAt: Date;
   }>
 > {
-  return db
-    .select({
-      id: bookings.id,
-      startAt: bookings.startAt,
-      endAt: bookings.endAt,
-    })
-    .from(bookings)
-    .where(
-      and(
-        eq(bookings.source, "TIMETABLE_ALLOCATION"),
-        like(bookings.sourceRef, `batch:${batchId}:row:${rowId}:%`),
+  const [linkedOccurrenceRows, sourceRefRows] = await Promise.all([
+    db
+      .select({
+        id: bookings.id,
+        startAt: bookings.startAt,
+        endAt: bookings.endAt,
+      })
+      .from(bookings)
+      .innerJoin(
+        timetableImportOccurrences,
+        eq(timetableImportOccurrences.bookingId, bookings.id),
+      )
+      .where(
+        and(
+          eq(timetableImportOccurrences.batchId, batchId),
+          eq(timetableImportOccurrences.rowId, rowId),
+        ),
       ),
-    );
+    db
+      .select({
+        id: bookings.id,
+        startAt: bookings.startAt,
+        endAt: bookings.endAt,
+      })
+      .from(bookings)
+      .where(like(bookings.sourceRef, `batch:${batchId}:row:${rowId}:%`)),
+  ]);
+
+  const bookingById = new Map<
+    number,
+    {
+      id: number;
+      startAt: Date;
+      endAt: Date;
+    }
+  >();
+
+  for (const row of linkedOccurrenceRows) {
+    bookingById.set(row.id, row);
+  }
+
+  for (const row of sourceRefRows) {
+    if (!bookingById.has(row.id)) {
+      bookingById.set(row.id, row);
+    }
+  }
+
+  return Array.from(bookingById.values());
 }
 
 async function getCommittedRowsForEdit(slotSystemId: number): Promise<CommittedRowForEdit[]> {
@@ -1210,7 +1248,12 @@ async function getSlotDescriptorLookup(slotSystemId: number): Promise<Map<string
   return descriptorsByLabel;
 }
 
-async function buildOperations(batchId: number): Promise<{ operations: SessionOperation[]; slotSystemId: number }> {
+async function buildOperations(input: {
+  batchId: number;
+  allowCommittedBatch?: boolean;
+  targetRowIds?: number[];
+}): Promise<{ operations: SessionOperation[]; slotSystemId: number }> {
+  const batchId = Number(input.batchId);
   const [batch] = await db
     .select({
       id: timetableImportBatches.id,
@@ -1227,7 +1270,7 @@ async function buildOperations(batchId: number): Promise<{ operations: SessionOp
     throw createServiceError(404, "Import batch not found");
   }
 
-  if (batch.status === "COMMITTED") {
+  if (batch.status === "COMMITTED" && !input.allowCommittedBatch) {
     throw createServiceError(400, "Batch is already committed");
   }
 
@@ -1256,6 +1299,19 @@ async function buildOperations(batchId: number): Promise<{ operations: SessionOp
       .from(timetableImportRowResolutions)
       .where(eq(timetableImportRowResolutions.batchId, batchId)),
   ]);
+
+  const targetRowIdSet =
+    Array.isArray(input.targetRowIds) && input.targetRowIds.length > 0
+      ? new Set(
+          input.targetRowIds.filter(
+            (rowId) => Number.isInteger(rowId) && rowId > 0,
+          ),
+        )
+      : null;
+
+  const scopedRows = targetRowIdSet
+    ? rows.filter((row) => targetRowIdSet.has(row.id))
+    : rows;
 
   const resolutionByRowId = new Map(
     storedResolutions.map((resolution) => [resolution.rowId, resolution]),
@@ -1294,7 +1350,7 @@ async function buildOperations(batchId: number): Promise<{ operations: SessionOp
   const descriptorLookup = await getSlotDescriptorLookup(batch.slotSystemId);
   const operations: SessionOperation[] = [];
 
-  for (const row of rows) {
+  for (const row of scopedRows) {
     const resolution = resolutionByRowId.get(row.id);
     const action =
       resolution?.action ?? (row.classification === "VALID_AND_AUTOMATABLE" ? "AUTO" : "SKIP");
@@ -2326,6 +2382,8 @@ export async function startCommitSession(input: {
   batchId: number;
   userId: number;
   decisions?: unknown;
+  allowCommittedBatch?: boolean;
+  targetRowIds?: number[];
 }): Promise<CommitSessionSummary> {
   const batchId = Number(input.batchId);
 
@@ -2340,8 +2398,31 @@ export async function startCommitSession(input: {
     });
   }
 
-  const { operations, slotSystemId } = await buildOperations(batchId);
+  const allowCommittedBatch = input.allowCommittedBatch === true;
+  const targetRowIds =
+    allowCommittedBatch && Array.isArray(input.targetRowIds) && input.targetRowIds.length > 0
+      ? Array.from(
+          new Set(
+            input.targetRowIds.filter(
+              (rowId) => Number.isInteger(rowId) && rowId > 0,
+            ),
+          ),
+        )
+      : [];
+
+  const { operations, slotSystemId } = await buildOperations({
+    batchId,
+    allowCommittedBatch,
+    ...(targetRowIds.length > 0 ? { targetRowIds } : {}),
+  });
   await ensureNoActiveSession(slotSystemId);
+
+  if (allowCommittedBatch && targetRowIds.length > 0) {
+    await resetCommittedBatchRowsForReallocation({
+      batchId,
+      rowIds: targetRowIds,
+    });
+  }
 
   const payloadSnapshot = buildSnapshot(operations);
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { X, AlertCircle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useRoomDayTimeline } from "../hooks/useAvailability";
@@ -34,6 +34,42 @@ type AvailabilityPreferences = {
   timeRangeEnd: string;
   selectedBuildingIdForRoomView: number | null;
 };
+
+function isValidDateInputValue(value: string): boolean {
+  const trimmed = value.trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return false;
+  }
+
+  const parsed = new Date(`${trimmed}T00:00:00`);
+  return !Number.isNaN(parsed.getTime());
+}
+
+function parseTimeInputToMinutes(value: string): number | null {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d{2}):(\d{2})$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+
+  if (
+    !Number.isInteger(hours) ||
+    !Number.isInteger(minutes) ||
+    hours < 0 ||
+    hours > 23 ||
+    minutes < 0 ||
+    minutes > 59
+  ) {
+    return null;
+  }
+
+  return hours * 60 + minutes;
+}
 
 function readAvailabilityPreferences(): AvailabilityPreferences {
   const defaults: AvailabilityPreferences = {
@@ -73,7 +109,7 @@ function readAvailabilityPreferences(): AvailabilityPreferences {
           ? parsed.selectedRoomId
           : null,
       selectedDate:
-        typeof parsed.selectedDate === "string" && parsed.selectedDate.length > 0
+        typeof parsed.selectedDate === "string" && isValidDateInputValue(parsed.selectedDate)
           ? parsed.selectedDate
           : defaults.selectedDate,
       timeRangeStart:
@@ -103,6 +139,10 @@ export function AvailabilityPage({
   const [initialPreferences] = useState<AvailabilityPreferences>(() =>
     readAvailabilityPreferences(),
   );
+  const initialDateSelection =
+    initialPreferences.selectedDate && isValidDateInputValue(initialPreferences.selectedDate)
+      ? initialPreferences.selectedDate
+      : getCurrentISTDateInputValue();
   const { user } = useAuth();
   const navigate = useNavigate();
   const isStaff = user?.role === "STAFF";
@@ -112,9 +152,9 @@ export function AvailabilityPage({
   const [viewMode, setViewMode] = useState<"time" | "room" | "exact">(initialPreferences.viewMode);
   const [selectedBuildingId, setSelectedBuildingId] = useState<number | null>(initialPreferences.selectedBuildingId);
   const [selectedRoomId, setSelectedRoomId] = useState<number | null>(initialPreferences.selectedRoomId);
-  const [selectedDate, setSelectedDate] = useState(initialPreferences.selectedDate);
+  const [selectedDate, setSelectedDate] = useState(initialDateSelection);
   const [selectedRoomIds, setSelectedRoomIds] = useState<number[]>([]);
-  const [selectedDates, setSelectedDates] = useState<string[]>([]);
+  const [selectedDates, setSelectedDates] = useState<string[]>([initialDateSelection]);
   const [staffBuildingIds, setStaffBuildingIds] = useState<number[]>([]);
   const [timeRangeStart, setTimeRangeStart] = useState(initialPreferences.timeRangeStart);
   const [timeRangeEnd, setTimeRangeEnd] = useState(initialPreferences.timeRangeEnd);
@@ -128,8 +168,23 @@ export function AvailabilityPage({
   // When building changes, reset room selection
   useEffect(() => {
     setSelectedRoomId(null);
-    setSelectedDates([]);
+    setSelectedDates([selectedDate]);
   }, [selectedBuildingId]);
+
+  const parsedTimeRangeStart = parseTimeInputToMinutes(timeRangeStart);
+  const parsedTimeRangeEnd = parseTimeInputToMinutes(timeRangeEnd);
+
+  const timeRangeError = useMemo(() => {
+    if (parsedTimeRangeStart === null || parsedTimeRangeEnd === null) {
+      return "Please enter valid Time From and Time To values.";
+    }
+
+    if (parsedTimeRangeStart >= parsedTimeRangeEnd) {
+      return "Time From must be earlier than Time To.";
+    }
+
+    return null;
+  }, [parsedTimeRangeEnd, parsedTimeRangeStart]);
 
   // Load staff's assigned buildings
   useEffect(() => {
@@ -178,9 +233,10 @@ export function AvailabilityPage({
     setViewMode("time");
     setSelectedBuildingId(null);
     setSelectedRoomId(null);
-    setSelectedDate(getCurrentISTDateInputValue());
+    const resetDate = getCurrentISTDateInputValue();
+    setSelectedDate(resetDate);
     setSelectedRoomIds([]);
-    setSelectedDates([]);
+    setSelectedDates([resetDate]);
     setTimeRangeStart("00:00");
     setTimeRangeEnd("23:59");
     setShowRoomGrid(false);
@@ -357,10 +413,16 @@ export function AvailabilityPage({
               </div>
             </div>
           )}
+
+          {selectedRoomId && selectedRoom && timeRangeError && (
+            <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {timeRangeError}
+            </div>
+          )}
         </div>
 
         {/* Timeline Grid View Section */}
-        {selectedRoomId && selectedRoom && (
+        {selectedRoomId && selectedRoom && !timeRangeError && (
           <>
             {/* Grid: Dates (rows) x Time (columns) */}
             <div className="overflow-x-auto">
@@ -449,13 +511,26 @@ export function AvailabilityPage({
             </div>
 
             <button
-              onClick={() => setShowRoomGrid(true)}
+              onClick={() => {
+                if (timeRangeError) {
+                  setShowRoomGrid(false);
+                  return;
+                }
+
+                setShowRoomGrid(true);
+              }}
               className="btn btn-primary btn-sm"
               title="Load grid"
             >
               Load Grid
             </button>
           </div>
+
+          {timeRangeError && (
+            <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {timeRangeError}
+            </div>
+          )}
         </div>
 
         {/* Add Room Section */}
@@ -517,7 +592,7 @@ export function AvailabilityPage({
         </div>
 
         {/* Rooms Grid */}
-        {selectedRoomIds.length > 0 && showRoomGrid && (
+        {selectedRoomIds.length > 0 && showRoomGrid && !timeRangeError && (
           <>
             <div className="overflow-x-auto">
               <RoomAvailabilityGrid
@@ -573,7 +648,7 @@ export function AvailabilityPage({
                   </label>
                   <input
                     type="date"
-                    value={selectedDates[0] || getCurrentISTDateInputValue()}
+                    value={selectedDates[0] || initialDateSelection}
                     onChange={(e) => {
                       setSelectedDates([e.target.value]);
                     }}
@@ -608,6 +683,12 @@ export function AvailabilityPage({
                 </div>
               </div>
             </div>
+
+            {timeRangeError && (
+              <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                {timeRangeError}
+              </div>
+            )}
           </div>
 
           {/* Exact Availability View Component - always show so user can select buildings */}
@@ -616,6 +697,7 @@ export function AvailabilityPage({
             timeRangeStart={timeRangeStart}
             timeRangeEnd={timeRangeEnd}
             buildings={buildings}
+            timeRangeValidationError={timeRangeError}
           />
         </div>
       )}

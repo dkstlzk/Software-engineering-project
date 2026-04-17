@@ -9,12 +9,14 @@ import { useAuth } from "../../auth/AuthContext";
 import { getUserBuildingAssignments } from "../../lib/api";
 import type { AvailabilityRoom, Building } from "../../lib/api";
 import type { BookingRequestPrefill } from "../bookingAvailabilityBridge";
+import { formatError } from "../../utils/formatError";
 
 type ExactAvailabilityViewProps = {
   selectedDates: string[];
   timeRangeStart: string;
   timeRangeEnd: string;
   buildings?: Building[];
+  timeRangeValidationError?: string | null;
 };
 
 interface RoomWithBuilding extends AvailabilityRoom {
@@ -27,6 +29,7 @@ export function ExactAvailabilityView({
   timeRangeStart,
   timeRangeEnd,
   buildings: providedBuildings,
+  timeRangeValidationError = null,
 }: ExactAvailabilityViewProps) {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -52,8 +55,14 @@ export function ExactAvailabilityView({
   const { 
     data: availabilityData = [], 
     isLoading, 
-    isError 
-  } = useAvailability(startAt, endAt, undefined, hasSearched && !!startAt && !!endAt);
+    isError,
+    error: availabilityError,
+  } = useAvailability(
+    startAt,
+    endAt,
+    undefined,
+    hasSearched && !!startAt && !!endAt && !timeRangeValidationError,
+  );
 
   // Load staff's assigned buildings
   useEffect(() => {
@@ -100,11 +109,17 @@ export function ExactAvailabilityView({
   // Set error when API fails
   useEffect(() => {
     if (isError) {
-      setError("Failed to load room availability. Please try again.");
+      setError(formatError(availabilityError, "Failed to load room availability. Please try again."));
     } else {
       setError(null);
     }
-  }, [isError]);
+  }, [availabilityError, isError]);
+
+  useEffect(() => {
+    if (timeRangeValidationError) {
+      setHasSearched(false);
+    }
+  }, [timeRangeValidationError]);
 
   const handleRoomClick = (room: RoomWithBuilding) => {
     const startTime = `${selectedDates[0]}T${timeRangeStart}:00`;
@@ -131,10 +146,18 @@ export function ExactAvailabilityView({
       setError("Please select a date");
       return;
     }
+
+    if (timeRangeValidationError) {
+      setError(timeRangeValidationError);
+      return;
+    }
+
     if (selectedBuildingIds.length === 0) {
       setError("Please select at least one building");
       return;
     }
+
+    setError(null);
     setHasSearched(true);
   };
 
@@ -170,7 +193,11 @@ export function ExactAvailabilityView({
           <div className="flex justify-end">
             <button
               onClick={handleProceedSearch}
-              disabled={selectedBuildingIds.length === 0 || selectedDates.length === 0}
+              disabled={
+                selectedBuildingIds.length === 0 ||
+                selectedDates.length === 0 ||
+                Boolean(timeRangeValidationError)
+              }
               className="px-3 py-1.5 text-sm bg-blue-500 text-white rounded-md font-medium hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
             >
               Search Availability

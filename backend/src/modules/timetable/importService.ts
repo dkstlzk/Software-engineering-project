@@ -2623,6 +2623,36 @@ async function resetRowsForReallocation(
   };
 }
 
+export async function resetCommittedBatchRowsForReallocation(input: {
+  batchId: number;
+  rowIds: number[];
+}): Promise<{ deletedBookings: number }> {
+  const batchId = Number(input.batchId);
+
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    throw createServiceError(400, "Invalid batchId");
+  }
+
+  const [batch] = await db
+    .select({
+      id: timetableImportBatches.id,
+      status: timetableImportBatches.status,
+    })
+    .from(timetableImportBatches)
+    .where(eq(timetableImportBatches.id, batchId))
+    .limit(1);
+
+  if (!batch) {
+    throw createServiceError(404, "Import batch not found");
+  }
+
+  if (batch.status !== "COMMITTED") {
+    throw createServiceError(409, "Only committed batches can be reallocated");
+  }
+
+  return resetRowsForReallocation(batchId, input.rowIds ?? []);
+}
+
 export async function recomputeCommittedBatchRows(input: {
   batchId: number;
   rowIds: number[];
@@ -3031,15 +3061,85 @@ function getClassificationReasonsForCurrentStructure(
   return fallbackReasons;
 }
 
+function resolveRoomForCurrentStructure(input: {
+  rawClassroom: string | null;
+  buildingLookup: BuildingRoomLookup;
+  aliasMap: Map<string, string>;
+}): {
+  parsedBuilding: string | null;
+  parsedRoom: string | null;
+  resolvedRoomId: number | null;
+} {
+  const normalizedClassroom = normalizeSpace(input.rawClassroom ?? "");
+
+  if (!normalizedClassroom) {
+    return {
+      parsedBuilding: null,
+      parsedRoom: null,
+      resolvedRoomId: null,
+    };
+  }
+
+  const classroomParts = getClassroomParts(normalizedClassroom, {
+    buildingByKey: input.buildingLookup.buildingByKey,
+    aliasMap: input.aliasMap,
+  });
+
+  if (!classroomParts) {
+    return {
+      parsedBuilding: null,
+      parsedRoom: null,
+      resolvedRoomId: null,
+    };
+  }
+
+  const parsedBuilding = classroomParts.building;
+  const parsedRoom = classroomParts.room;
+  const aliasResolvedBuilding =
+    input.aliasMap.get(normalizeKey(parsedBuilding)) ?? parsedBuilding;
+  const buildingMatch = input.buildingLookup.buildingByKey.get(
+    normalizeKey(aliasResolvedBuilding),
+  );
+
+  if (!buildingMatch) {
+    return {
+      parsedBuilding,
+      parsedRoom,
+      resolvedRoomId: null,
+    };
+  }
+
+  const roomsInBuilding = input.buildingLookup.roomsByBuildingId.get(buildingMatch.id) ?? new Map();
+  const roomMatch = roomsInBuilding.get(normalizeKey(parsedRoom));
+
+  return {
+    parsedBuilding,
+    parsedRoom,
+    resolvedRoomId: roomMatch?.id ?? null,
+  };
+}
+
 async function synchronizePreviewedBatchRowsWithCurrentStructure(input: {
   batchId: number;
   slotSystemId: number;
 }): Promise<void> {
-  const rows = await getBatchRows(input.batchId);
+  const [rows, batchRows] = await Promise.all([
+    getBatchRows(input.batchId),
+    db
+      .select({
+        aliasMap: timetableImportBatches.aliasMap,
+      })
+      .from(timetableImportBatches)
+      .where(eq(timetableImportBatches.id, input.batchId))
+      .limit(1),
+  ]);
 
   if (rows.length === 0) {
     return;
   }
+
+  const batchAliasMap = batchRows[0]?.aliasMap;
+  const aliasMap = parseAliasMap(batchAliasMap ?? {});
 
   const [slotLookup, buildingLookup] = await Promise.all([
     getSlotDescriptorLookup(input.slotSystemId),
@@ -3048,10 +3148,13 @@ async function synchronizePreviewedBatchRowsWithCurrentStructure(input: {
 
   await db.transaction(async (tx) => {
     for (const row of rows) {
-      if (
-        row.classification !== "UNRESOLVED_SLOT" &&
-        row.classification !== "VALID_AND_AUTOMATABLE"
-      ) {
+      const shouldReevaluateClassification =
+        row.classification === "UNRESOLVED_SLOT" ||
+        row.classification === "UNRESOLVED_ROOM" ||
+        row.classification === "AMBIGUOUS_CLASSROOM" ||
+        row.classification === "VALID_AND_AUTOMATABLE";
+
+      if (!shouldReevaluateClassification) {
         continue;
       }
 
@@ -3065,30 +3168,32 @@ async function synchronizePreviewedBatchRowsWithCurrentStructure(input: {
         effectiveSlotLabel.length > 0 &&
         (slotLookup.descriptorsByLabel.get(normalizeKey(effectiveSlotLabel))?.length ?? 0) > 0;
 
+      const roomResolution = resolveRoomForCurrentStructure({
+        rawClassroom: row.rawClassroom,
+        buildingLookup,
+        aliasMap,
+      });
+
+      const hasParsedClassroom =
+        typeof roomResolution.parsedBuilding === "string" &&
+        roomResolution.parsedBuilding.length > 0 &&
+        typeof roomResolution.parsedRoom === "string" &&
+        roomResolution.parsedRoom.length > 0;
+
       const hasResolvedRoom =
-        typeof row.resolvedRoomId === "number" &&
-        buildingLookup.roomById.has(row.resolvedRoomId);
+        typeof roomResolution.resolvedRoomId === "number" &&
+        roomResolution.resolvedRoomId > 0;
 
-      let nextClassification: PreviewClassification = row.classification;
+      let nextClassification: PreviewClassification;
 
-      if (row.classification === "UNRESOLVED_SLOT") {
-        if (!hasEffectiveSlot) {
-          nextClassification = "UNRESOLVED_SLOT";
-        } else if (hasResolvedRoom) {
-          nextClassification = "VALID_AND_AUTOMATABLE";
-        } else if (row.parsedBuilding && row.parsedRoom) {
-          nextClassification = "UNRESOLVED_ROOM";
-        } else {
-          nextClassification = "AMBIGUOUS_CLASSROOM";
-        }
-      } else if (row.classification === "VALID_AND_AUTOMATABLE") {
-        if (!hasEffectiveSlot) {
-          nextClassification = "UNRESOLVED_SLOT";
-        } else if (!hasResolvedRoom) {
-          nextClassification = row.parsedBuilding && row.parsedRoom
-            ? "UNRESOLVED_ROOM"
-            : "AMBIGUOUS_CLASSROOM";
-        }
+      if (!hasEffectiveSlot) {
+        nextClassification = "UNRESOLVED_SLOT";
+      } else if (!hasParsedClassroom) {
+        nextClassification = "AMBIGUOUS_CLASSROOM";
+      } else if (!hasResolvedRoom) {
+        nextClassification = "UNRESOLVED_ROOM";
+      } else {
+        nextClassification = "VALID_AND_AUTOMATABLE";
       }
 
       const normalizedStoredResolvedSlotLabel = row.resolvedSlotLabel
@@ -3104,8 +3209,20 @@ async function synchronizePreviewedBatchRowsWithCurrentStructure(input: {
 
       const classificationChanged = nextClassification !== row.classification;
       const resolvedSlotChanged = nextResolvedSlotLabel !== normalizedStoredResolvedSlotLabel;
+      const parsedBuildingChanged =
+        (row.parsedBuilding ?? null) !== (roomResolution.parsedBuilding ?? null);
+      const parsedRoomChanged =
+        (row.parsedRoom ?? null) !== (roomResolution.parsedRoom ?? null);
+      const resolvedRoomChanged =
+        (row.resolvedRoomId ?? null) !== (roomResolution.resolvedRoomId ?? null);
 
-      if (!classificationChanged && !resolvedSlotChanged) {
+      if (
+        !classificationChanged &&
+        !resolvedSlotChanged &&
+        !parsedBuildingChanged &&
+        !parsedRoomChanged &&
+        !resolvedRoomChanged
+      ) {
         continue;
       }
 
@@ -3113,6 +3230,9 @@ async function synchronizePreviewedBatchRowsWithCurrentStructure(input: {
         classification?: PreviewClassification;
         reasons?: string[];
         resolvedSlotLabel?: string | null;
+        parsedBuilding?: string | null;
+        parsedRoom?: string | null;
+        resolvedRoomId?: number | null;
       } = {};
 
       if (classificationChanged) {
@@ -3125,6 +3245,18 @@ async function synchronizePreviewedBatchRowsWithCurrentStructure(input: {
 
       if (resolvedSlotChanged) {
         updatePayload.resolvedSlotLabel = nextResolvedSlotLabel;
+      }
+
+      if (parsedBuildingChanged) {
+        updatePayload.parsedBuilding = roomResolution.parsedBuilding;
+      }
+
+      if (parsedRoomChanged) {
+        updatePayload.parsedRoom = roomResolution.parsedRoom;
+      }
+
+      if (resolvedRoomChanged) {
+        updatePayload.resolvedRoomId = roomResolution.resolvedRoomId;
       }
 
       await tx

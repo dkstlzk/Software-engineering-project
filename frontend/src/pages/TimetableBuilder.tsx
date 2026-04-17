@@ -3,7 +3,6 @@ import type { FormEvent } from "react";
 import {
   addDayLane as apiAddDayLane,
   createBooking as apiCreateBooking,
-  createRoom as apiCreateRoom,
   duplicateSlotSystem as apiDuplicateSlotSystem,
   getTimetableImportBatch as apiGetTimetableImportBatch,
   getTimetableImportBatches as apiGetTimetableImportBatches,
@@ -20,7 +19,6 @@ import {
   getFullGrid,
   pruneAllBookings as apiPruneAllBookings,
   pruneBookingsBySlotSystem as apiPruneBookingsBySlotSystem,
-  reallocateTimetableImport as apiReallocateTimetableImport,
   removeDayLane as apiRemoveDayLane,
   getRooms,
   getSlotSystems,
@@ -160,7 +158,6 @@ type DragSelection = {
 };
 
 type SlotResolutionMode = "SELECT_EXISTING" | "CREATE_SLOT";
-type RoomResolutionMode = "SELECT_EXISTING" | "CREATE_ROOM";
 
 type ProcessedBookingEditState = {
   roomId: number | "";
@@ -174,42 +171,36 @@ type ConflictResolutionDraft = {
   action: CommitResolutionAction;
   target?: CommitResolutionTarget;
   roomId?: number;
+  roomBuildingId?: number | "";
   startAt?: string;
   endAt?: string;
-  roomResolutionMode?: "SELECT_EXISTING" | "CREATE_ROOM";
-  createRoomBuildingId?: number | "";
-  createRoomName?: string;
 };
 
 type RowDecisionState = {
   action: RowDecisionAction;
   slotResolutionMode: SlotResolutionMode;
-  roomResolutionMode: RoomResolutionMode;
   resolvedSlotLabel: string;
   resolvedRoomId: number | "";
+  resolvedRoomBuildingId: number | "";
   createSlotLabel: string;
   createSlotDayId: number | "";
   createSlotStartBandId: number | "";
   createSlotEndBandId: number | "";
   createSlotLaneIndex: number;
-  createRoomBuildingName: string;
-  createRoomName: string;
 };
 
 function createEmptyDecisionState(): RowDecisionState {
   return {
     action: "SKIP",
     slotResolutionMode: "SELECT_EXISTING",
-    roomResolutionMode: "SELECT_EXISTING",
     resolvedSlotLabel: "",
     resolvedRoomId: "",
+    resolvedRoomBuildingId: "",
     createSlotLabel: "",
     createSlotDayId: "",
     createSlotStartBandId: "",
     createSlotEndBandId: "",
     createSlotLaneIndex: 0,
-    createRoomBuildingName: "",
-    createRoomName: "",
   };
 }
 
@@ -217,24 +208,17 @@ function createDecisionForPreviewRow(row: TimetableImportPreviewRow): RowDecisio
   const slotResolutionMode: SlotResolutionMode =
     row.classification === "UNRESOLVED_SLOT" ? "CREATE_SLOT" : "SELECT_EXISTING";
 
-  const roomResolutionMode: RoomResolutionMode =
-    row.classification === "UNRESOLVED_ROOM" || row.classification === "AMBIGUOUS_CLASSROOM"
-      ? "CREATE_ROOM"
-      : "SELECT_EXISTING";
-
   return {
     action: row.classification === "VALID_AND_AUTOMATABLE" ? "AUTO" : "SKIP",
     slotResolutionMode,
-    roomResolutionMode,
     resolvedSlotLabel: row.resolvedSlotLabel ?? row.slot,
     resolvedRoomId: row.resolvedRoomId ?? "",
+    resolvedRoomBuildingId: "",
     createSlotLabel: row.slot,
     createSlotDayId: "",
     createSlotStartBandId: "",
     createSlotEndBandId: "",
     createSlotLaneIndex: 0,
-    createRoomBuildingName: row.parsedBuilding ?? "",
-    createRoomName: row.parsedRoom ?? "",
   };
 }
 
@@ -266,14 +250,6 @@ function applySavedDecisionToRow(
     next.createSlotLabel = savedDecision.createSlot.label ?? next.createSlotLabel;
   } else if (savedDecision.resolvedSlotLabel) {
     next.slotResolutionMode = "SELECT_EXISTING";
-  }
-
-  if (savedDecision.createRoom) {
-    next.roomResolutionMode = "CREATE_ROOM";
-    next.createRoomBuildingName = savedDecision.createRoom.buildingName;
-    next.createRoomName = savedDecision.createRoom.roomName;
-  } else if (savedDecision.resolvedRoomId) {
-    next.roomResolutionMode = "SELECT_EXISTING";
   }
 
   return next;
@@ -416,17 +392,6 @@ function toDecisionComparisonSignature(
   });
 }
 
-function toConflictWindowRange(startAt: string, endAt: string): string {
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-    return `${startAt} - ${endAt}`;
-  }
-
-  return `${formatDateTimeDDMMYYYY(start)} - ${formatDateTimeDDMMYYYY(end)}`;
-}
-
 function toSnapshotStateFromGrid(grid: SlotFullGrid): TimetableSnapshotState {
   return {
     slotSystemId: grid.slotSystem.id,
@@ -548,35 +513,6 @@ function normalizeSnapshotDraftForCommit(
     blocks,
     ...(snapshot.roomAssignments ? { roomAssignments: snapshot.roomAssignments } : {}),
   };
-}
-
-function showConflictingBookingsPopup(
-  report: TimetableImportCommitReport,
-  operationLabel: string,
-) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  const conflicts = Array.isArray(report.conflictingBookings)
-    ? report.conflictingBookings
-    : [];
-
-  if (conflicts.length === 0) {
-    return;
-  }
-
-  const lines = conflicts.map(
-    (conflict, index) =>
-      `${index + 1}. Row ${conflict.rowIndex} · ${toConflictWindowRange(
-        conflict.startAt,
-        conflict.endAt,
-      )}\n   ${conflict.message}`,
-  );
-
-  window.alert(
-    `${operationLabel} found ${conflicts.length} conflicting booking(s):\n\n${lines.join("\n\n")}`,
-  );
 }
 
 function toCommitStageLabel(stage: CommitSessionStage): string {
@@ -758,7 +694,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
   const [showConflictDialog, setShowConflictDialog] = useState(false);
   const [isCommitFreezeActive, setIsCommitFreezeActive] = useState(false);
   const [commitPipelineStep, setCommitPipelineStep] = useState<CommitPipelineStep>("IDLE");
-  const [commitFlowContext, setCommitFlowContext] = useState<"import" | "edit" | null>(null);
+  const [commitFlowContext, setCommitFlowContext] = useState<"import" | "reallocate" | "edit" | null>(null);
   const [commitTargetSlotSystemId, setCommitTargetSlotSystemId] = useState<number | null>(null);
 
   // Change workspace state
@@ -867,6 +803,32 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
 
     return map;
   }, [rooms, buildingNameById]);
+
+  const roomById = useMemo(() => {
+    return new Map(rooms.map((room) => [room.id, room]));
+  }, [rooms]);
+
+  const roomsByBuildingId = useMemo(() => {
+    const map = new Map<number, Room[]>();
+
+    for (const room of rooms) {
+      const existing = map.get(room.buildingId) ?? [];
+      existing.push(room);
+      map.set(room.buildingId, existing);
+    }
+
+    return map;
+  }, [rooms]);
+
+  const buildingIdByNormalizedName = useMemo(() => {
+    const map = new Map<string, number>();
+
+    for (const building of buildings) {
+      map.set(building.name.trim().toLowerCase(), building.id);
+    }
+
+    return map;
+  }, [buildings]);
 
   const bandIndexById = useMemo(() => {
     const map = new Map<number, number>();
@@ -1070,7 +1032,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     }
   };
 
-  const loadRoomContext = async () => {
+  const loadRoomContext = useCallback(async () => {
     try {
       const [loadedBuildings, loadedRooms] = await Promise.all([
         getBuildings(),
@@ -1082,7 +1044,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     } catch {
       // Keep the page usable even if resolution helpers fail to load.
     }
-  };
+  }, []);
 
   const loadImportBatches = async (slotSystemId: number | "") => {
     if (slotSystemId === "") {
@@ -1192,6 +1154,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     try {
       const report = await apiGetTimetableImportBatch(batchId);
       hydratePreviewFromBatch(report);
+      await loadRoomContext();
       setProcessedRowsReport(null);
       setProcessedRowsError(null);
       setProcessedBookingEdits({});
@@ -1204,7 +1167,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     } finally {
       setImportLoading(false);
     }
-  }, []);
+  }, [loadRoomContext]);
 
   const handleLoadProcessedRowsForActiveBatch = async () => {
     if (activeBatchId === null) {
@@ -2053,8 +2016,6 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
 
     const trimmedResolvedSlotLabel = decision.resolvedSlotLabel.trim();
     const trimmedCreateSlotLabel = decision.createSlotLabel.trim();
-    const trimmedCreateRoomBuilding = decision.createRoomBuildingName.trim();
-    const trimmedCreateRoomName = decision.createRoomName.trim();
 
     if (decision.slotResolutionMode === "CREATE_SLOT") {
       if (
@@ -2073,14 +2034,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
       resolveDecision.resolvedSlotLabel = trimmedResolvedSlotLabel;
     }
 
-    if (decision.roomResolutionMode === "CREATE_ROOM") {
-      if (trimmedCreateRoomBuilding && trimmedCreateRoomName) {
-        resolveDecision.createRoom = {
-          buildingName: trimmedCreateRoomBuilding,
-          roomName: trimmedCreateRoomName,
-        };
-      }
-    } else if (decision.resolvedRoomId !== "") {
+    if (decision.resolvedRoomId !== "") {
       resolveDecision.resolvedRoomId = decision.resolvedRoomId;
     }
 
@@ -2220,6 +2174,9 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     setReallocateLoading(true);
     setImportError(null);
     setImportInfo(null);
+    setCommitPipelineStep("SESSION_STARTED");
+
+    let startedCommitSessionId: number | null = null;
 
     try {
       const decisions = buildChangedImportDecisionsPayload();
@@ -2229,19 +2186,55 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
         return;
       }
 
-      const report = await apiReallocateTimetableImport(previewReport.batchId, decisions);
-      setCommitReport(report);
-      showConflictingBookingsPopup(report, "Reallocation");
+      const targetRowIds = Array.from(
+        new Set(
+          decisions
+            .map((decision) => Number(decision.rowId))
+            .filter((rowId) => Number.isInteger(rowId) && rowId > 0),
+        ),
+      );
 
-      const refreshedReport = await apiGetTimetableImportBatch(previewReport.batchId);
-      hydratePreviewFromBatch(refreshedReport);
-      setImportInfo(`Allocation decisions reallocated.`);
+      if (targetRowIds.length === 0) {
+        setImportInfo("No changed rows detected, so reallocation was skipped.");
+        return;
+      }
 
-      await loadGrid(refreshedReport.slotSystemId);
-      await loadProcessedRows(previewReport.batchId);
-      await loadImportBatches(refreshedReport.slotSystemId);
+      const session = await apiStartCommitSession(previewReport.batchId, decisions, {
+        allowCommittedBatch: true,
+        targetRowIds,
+      });
+      startedCommitSessionId = session.commitSessionId;
+
+      setCommitSessionId(session.commitSessionId);
+      setCommitFlowContext("reallocate");
+      setCommitTargetSlotSystemId(previewReport.slotSystemId);
+
+      setCommitPipelineStep("EXTERNAL_CHECK");
+      const externalReport = await apiRunExternalCommitCheck(session.commitSessionId);
+
+      if (externalReport.conflictCount > 0) {
+        setCommitPipelineStep("EXTERNAL_CONFLICTS");
+        setConflictStage("external");
+        setConflictReport(externalReport);
+        setConflictResolutions({});
+        setShowConflictDialog(true);
+        return;
+      }
+
+      await runInternalThenFinalize(session.commitSessionId, previewReport.batchId, "reallocate");
     } catch (e) {
-      setImportError(e instanceof Error ? e.message : "Failed to reallocate batch");
+      setCommitPipelineStep("FAILED");
+
+      const message = e instanceof Error ? e.message : "Failed to start staged reallocation";
+
+      if (isRateLimitError(e)) {
+        await cleanupAfterRateLimitedCommitFailure(startedCommitSessionId);
+        setImportError(
+          `${message} Reallocation session was reset to avoid a stuck running state. Retry once the cooldown ends.`,
+        );
+      } else {
+        setImportError(message);
+      }
     } finally {
       setReallocateLoading(false);
     }
@@ -2279,11 +2272,13 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     await loadProcessedRows(batchId);
     await loadImportBatches(refreshedReport.slotSystemId);
     await loadSlotSystems();
+    await loadRoomContext();
   };
 
   const runFreezeRuntimeAndFinalize = async (
     activeCommitSessionId: number,
     batchId: number,
+    flowContext: "import" | "reallocate",
   ) => {
     setCommitPipelineStep("FREEZE");
     await apiStartCommitFreeze(activeCommitSessionId);
@@ -2308,7 +2303,9 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     setCommitPipelineStep("COMPLETED");
     clearCommitConflictState();
     setImportInfo(
-      `Commit completed. Created ${finalizeReport.createdBookings} bookings and skipped ${finalizeReport.skippedOperations} operation(s).`,
+      flowContext === "reallocate"
+        ? `Reallocation completed. Created ${finalizeReport.createdBookings} bookings and skipped ${finalizeReport.skippedOperations} operation(s).`
+        : `Commit completed. Created ${finalizeReport.createdBookings} bookings and skipped ${finalizeReport.skippedOperations} operation(s).`,
     );
     await hydrateAfterFinalize(batchId);
   };
@@ -2316,6 +2313,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
   const runInternalThenFinalize = async (
     activeCommitSessionId: number,
     batchId: number,
+    flowContext: "import" | "reallocate",
   ) => {
     setCommitPipelineStep("INTERNAL_CHECK");
     const internalReport = await apiRunInternalCommitCheck(activeCommitSessionId);
@@ -2329,7 +2327,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
       return;
     }
 
-    await runFreezeRuntimeAndFinalize(activeCommitSessionId, batchId);
+    await runFreezeRuntimeAndFinalize(activeCommitSessionId, batchId, flowContext);
   };
 
   const runFreezeRuntimeAndFinalizeForEdit = async (
@@ -2427,7 +2425,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
         return;
       }
 
-      await runInternalThenFinalize(session.commitSessionId, previewReport.batchId);
+      await runInternalThenFinalize(session.commitSessionId, previewReport.batchId, "import");
     } catch (e) {
       setCommitPipelineStep("FAILED");
 
@@ -2476,36 +2474,11 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
         return false;
       }
 
-      if (resolution.roomResolutionMode === "CREATE_ROOM") {
-        return false;
-      }
-
       return !resolution.roomId;
     });
 
     if (missingRoom.length > 0) {
       setImportError("Please select a room for all room-change resolutions");
-      return;
-    }
-
-    const missingCreateRoomInputs = conflictReport.conflicts.filter((conflict) => {
-      const resolution = conflictResolutions[conflict.id];
-      if (!resolution || conflictStage === "runtime") {
-        return false;
-      }
-
-      if (resolution.action !== "CHANGE_ROOM" || resolution.roomResolutionMode !== "CREATE_ROOM") {
-        return false;
-      }
-
-      const buildingId = Number(resolution.createRoomBuildingId);
-      const roomName = resolution.createRoomName?.trim() ?? "";
-
-      return !Number.isInteger(buildingId) || buildingId <= 0 || roomName.length === 0;
-    });
-
-    if (missingCreateRoomInputs.length > 0) {
-      setImportError("Please provide building and room name for all create-room resolutions");
       return;
     }
 
@@ -2549,37 +2522,12 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
 
       for (const conflict of conflictReport.conflicts) {
         const resolution = conflictResolutions[conflict.id]!;
-        let resolvedRoomId = resolution.roomId;
-
-        if (
-          conflictStage !== "runtime" &&
-          resolution.action === "CHANGE_ROOM" &&
-          resolution.roomResolutionMode === "CREATE_ROOM"
-        ) {
-          const buildingId = Number(resolution.createRoomBuildingId);
-          const roomName = resolution.createRoomName?.trim() ?? "";
-
-          const createdRoom = await apiCreateRoom({
-            buildingId,
-            name: roomName,
-          });
-
-          resolvedRoomId = createdRoom.id;
-
-          setRooms((prevRooms) => {
-            if (prevRooms.some((room) => room.id === createdRoom.id)) {
-              return prevRooms;
-            }
-
-            return [...prevRooms, createdRoom];
-          });
-        }
 
         const nextResolution: CommitSessionResolutionDecision = {
           conflictId: conflict.id,
           action: resolution.action,
           ...(resolution.target ? { target: resolution.target } : {}),
-          ...(resolvedRoomId ? { roomId: resolvedRoomId } : {}),
+          ...(resolution.roomId ? { roomId: resolution.roomId } : {}),
         };
 
         if (
@@ -2621,7 +2569,11 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
             throw new Error("Missing import context for staged commit");
           }
 
-          await runInternalThenFinalize(commitSessionId, previewReport.batchId);
+          await runInternalThenFinalize(
+            commitSessionId,
+            previewReport.batchId,
+            commitFlowContext === "reallocate" ? "reallocate" : "import",
+          );
         }
 
         return;
@@ -2653,7 +2605,11 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
             throw new Error("Missing import context for staged commit");
           }
 
-          await runFreezeRuntimeAndFinalize(commitSessionId, previewReport.batchId);
+          await runFreezeRuntimeAndFinalize(
+            commitSessionId,
+            previewReport.batchId,
+            commitFlowContext === "reallocate" ? "reallocate" : "import",
+          );
         }
 
         return;
@@ -2699,7 +2655,9 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
         }
 
         setImportInfo(
-          `Commit completed. Created ${finalizeReport.createdBookings} bookings and skipped ${finalizeReport.skippedOperations} operation(s).`,
+          commitFlowContext === "reallocate"
+            ? `Reallocation completed. Created ${finalizeReport.createdBookings} bookings and skipped ${finalizeReport.skippedOperations} operation(s).`
+            : `Commit completed. Created ${finalizeReport.createdBookings} bookings and skipped ${finalizeReport.skippedOperations} operation(s).`,
         );
         await hydrateAfterFinalize(previewReport.batchId);
       }
@@ -2730,11 +2688,14 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
     try {
       await apiCancelCommitSession(commitSessionId);
       const cancelledEditFlow = commitFlowContext === "edit";
+      const cancelledReallocateFlow = commitFlowContext === "reallocate";
       setCommitPipelineStep("CANCELLED");
       clearCommitConflictState();
 
       if (cancelledEditFlow) {
         setChangeSuccess("Edit commit session cancelled. Booking operations resumed.");
+      } else if (cancelledReallocateFlow) {
+        setImportInfo("Reallocation session cancelled. Booking operations resumed.");
       } else {
         setImportInfo("Commit session cancelled. Booking operations resumed.");
       }
@@ -3691,6 +3652,25 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                         return index !== undefined && index >= selectedStartBandIndex;
                       });
 
+                const normalizedParsedBuilding = row.parsedBuilding?.trim().toLowerCase() ?? "";
+                const parsedBuildingId =
+                  normalizedParsedBuilding.length > 0
+                    ? (buildingIdByNormalizedName.get(normalizedParsedBuilding) ?? "")
+                    : "";
+
+                const resolvedRoomFromDecision =
+                  decision.resolvedRoomId === "" ? null : (roomById.get(decision.resolvedRoomId) ?? null);
+
+                const resolvedRoomBuildingId =
+                  decision.resolvedRoomBuildingId !== ""
+                    ? decision.resolvedRoomBuildingId
+                    : (resolvedRoomFromDecision?.buildingId ?? parsedBuildingId);
+
+                const roomOptionsForResolvedBuilding =
+                  resolvedRoomBuildingId === ""
+                    ? []
+                    : (roomsByBuildingId.get(resolvedRoomBuildingId) ?? []);
+
                 return (
                   <div className="data-item" key={row.rowId}>
                     <div className="data-item-content" style={{ width: "100%" }}>
@@ -3775,22 +3755,6 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                                 >
                                   <option value="SELECT_EXISTING">Select existing slot</option>
                                   <option value="CREATE_SLOT">Create slot in grid</option>
-                                </select>
-                              </div>
-                              <div className="form-field">
-                                <label>Room Resolution</label>
-                                <select
-                                  className="input"
-                                  value={decision.roomResolutionMode}
-                                  onChange={(e) =>
-                                    updateRowDecision(row.rowId, {
-                                      roomResolutionMode: e.target.value as RoomResolutionMode,
-                                    })
-                                  }
-                                  disabled={isDecisionEditingLocked}
-                                >
-                                  <option value="SELECT_EXISTING">Select existing room</option>
-                                  <option value="CREATE_ROOM">Create room</option>
                                 </select>
                               </div>
 
@@ -3927,62 +3891,55 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                                 </>
                               )}
 
-                              {decision.roomResolutionMode === "SELECT_EXISTING" ? (
-                                <div className="form-field">
-                                  <label>Resolved Room</label>
-                                  <select
-                                    className="input"
-                                    value={decision.resolvedRoomId}
-                                    onChange={(e) =>
-                                      updateRowDecision(row.rowId, {
-                                        resolvedRoomId:
-                                          e.target.value === "" ? "" : Number(e.target.value),
-                                      })
-                                    }
-                                    disabled={isDecisionEditingLocked}
-                                  >
-                                    <option value="">Select room</option>
-                                    {rooms.map((room) => (
-                                      <option key={room.id} value={room.id}>
-                                        {roomLabelById.get(room.id) ?? "Unknown Room"}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-                              ) : (
-                                <>
-                                  <div className="form-field">
-                                    <label>New Room Building</label>
-                                    <input
-                                      className="input"
-                                      type="text"
-                                      value={decision.createRoomBuildingName}
-                                      onChange={(e) =>
-                                        updateRowDecision(row.rowId, {
-                                          createRoomBuildingName: e.target.value,
-                                        })
-                                      }
-                                      placeholder="e.g. Civil Block"
-                                      disabled={isDecisionEditingLocked}
-                                    />
-                                  </div>
-                                  <div className="form-field">
-                                    <label>New Room Name</label>
-                                    <input
-                                      className="input"
-                                      type="text"
-                                      value={decision.createRoomName}
-                                      onChange={(e) =>
-                                        updateRowDecision(row.rowId, {
-                                          createRoomName: e.target.value,
-                                        })
-                                      }
-                                      placeholder="e.g. 204"
-                                      disabled={isDecisionEditingLocked}
-                                    />
-                                  </div>
-                                </>
-                              )}
+                              <div className="form-field">
+                                <label>Room Building</label>
+                                <select
+                                  className="input"
+                                  value={resolvedRoomBuildingId}
+                                  onChange={(e) =>
+                                    updateRowDecision(row.rowId, {
+                                      resolvedRoomBuildingId:
+                                        e.target.value === "" ? "" : Number(e.target.value),
+                                      resolvedRoomId: "",
+                                    })
+                                  }
+                                  disabled={isDecisionEditingLocked}
+                                >
+                                  <option value="">Select building</option>
+                                  {buildings.map((building) => (
+                                    <option key={building.id} value={building.id}>
+                                      {building.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div className="form-field">
+                                <label>Resolved Room</label>
+                                <select
+                                  className="input"
+                                  value={decision.resolvedRoomId}
+                                  onChange={(e) =>
+                                    updateRowDecision(row.rowId, {
+                                      resolvedRoomBuildingId,
+                                      resolvedRoomId:
+                                        e.target.value === "" ? "" : Number(e.target.value),
+                                    })
+                                  }
+                                  disabled={isDecisionEditingLocked || resolvedRoomBuildingId === ""}
+                                >
+                                  <option value="">
+                                    {resolvedRoomBuildingId === ""
+                                      ? "Select building first"
+                                      : "Select room"}
+                                  </option>
+                                  {roomOptionsForResolvedBuilding.map((room) => (
+                                    <option key={room.id} value={room.id}>
+                                      {roomLabelById.get(room.id) ?? "Unknown Room"}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
                           </>
                         )}
                       </div>
@@ -4838,7 +4795,7 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
             <div className="space-y-4">
               {conflictReport.conflicts.map((conflict) => {
                 const resolution = conflictResolutions[conflict.id];
-                const conflictRoomLabel = roomLabelById.get(conflict.roomId) || `Room #${conflict.roomId}`;
+                const conflictRoomLabel = roomLabelById.get(conflict.roomId) || "Unknown Room";
                 const metadata = conflict.metadata ?? {};
                 const conflictingBookingId = readMetadataNumber(metadata, "conflictingBookingId");
                 const conflictingStartAt = readMetadataString(metadata, "conflictingStartAt");
@@ -4846,9 +4803,19 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                 const secondaryRowIndex = readMetadataNumber(metadata, "secondaryRowIndex");
                 const affectedOperationCount = readMetadataNumber(metadata, "affectedOperationCount");
                 const activeTarget: CommitResolutionTarget = resolution?.target ?? "COMMITTING";
-                const roomResolutionMode = resolution?.roomResolutionMode ?? "SELECT_EXISTING";
                 const slotStartDraft = resolution?.startAt ?? toDateInputValue(conflict.startAt);
                 const slotEndDraft = resolution?.endAt ?? toDateInputValue(conflict.endAt);
+                const resolvedConflictRoom = roomById.get(conflict.roomId);
+                const resolvedSelectedRoom =
+                  typeof resolution?.roomId === "number" ? roomById.get(resolution.roomId) : undefined;
+                const activeRoomBuildingId =
+                  resolution?.roomBuildingId !== undefined && resolution.roomBuildingId !== ""
+                    ? resolution.roomBuildingId
+                    : (resolvedSelectedRoom?.buildingId ?? resolvedConflictRoom?.buildingId ?? "");
+                const roomOptionsForBuilding =
+                  activeRoomBuildingId === ""
+                    ? []
+                    : (roomsByBuildingId.get(activeRoomBuildingId) ?? []);
 
                 return (
                   <div
@@ -4941,8 +4908,6 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                                     ...(prev[conflict.id] ?? {}),
                                     action: "CHANGE_ROOM",
                                     target: activeTarget,
-                                    roomResolutionMode:
-                                      prev[conflict.id]?.roomResolutionMode ?? "SELECT_EXISTING",
                                   },
                                 }))
                               }
@@ -5082,30 +5047,34 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                       {(resolution?.action === "ALTERNATIVE_ROOM" ||
                         resolution?.action === "CHANGE_ROOM") && (
                         <div className="space-y-2">
-                          {conflictStage !== "runtime" && resolution?.action === "CHANGE_ROOM" && (
+                          <div className="grid gap-2 sm:grid-cols-2">
                             <select
                               className="input"
-                              style={{ maxWidth: "260px" }}
-                              value={roomResolutionMode}
+                              value={activeRoomBuildingId}
                               onChange={(e) =>
                                 setConflictResolutions((prev) => ({
                                   ...prev,
                                   [conflict.id]: {
-                                    ...(prev[conflict.id] ?? { action: "CHANGE_ROOM" }),
-                                    roomResolutionMode: e.target.value as "SELECT_EXISTING" | "CREATE_ROOM",
+                                    ...(prev[conflict.id] ?? {
+                                      action: resolution?.action ?? "CHANGE_ROOM",
+                                    }),
+                                    roomBuildingId:
+                                      e.target.value === "" ? "" : Number(e.target.value),
+                                    roomId: undefined,
                                   },
                                 }))
                               }
                             >
-                              <option value="SELECT_EXISTING">Select Existing Room</option>
-                              <option value="CREATE_ROOM">Create Room</option>
+                              <option value="">Select building...</option>
+                              {buildings.map((building) => (
+                                <option key={building.id} value={building.id}>
+                                  {building.name}
+                                </option>
+                              ))}
                             </select>
-                          )}
 
-                          {(conflictStage === "runtime" || roomResolutionMode === "SELECT_EXISTING") && (
                             <select
                               className="input"
-                              style={{ maxWidth: "260px" }}
                               value={resolution?.roomId ?? ""}
                               onChange={(e) =>
                                 setConflictResolutions((prev) => ({
@@ -5114,62 +5083,25 @@ export function TimetableBuilderPage({ view = "all" }: TimetableBuilderPageProps
                                     ...(prev[conflict.id] ?? {
                                       action: resolution?.action ?? "CHANGE_ROOM",
                                     }),
+                                    roomBuildingId: activeRoomBuildingId,
                                     roomId: Number(e.target.value) || undefined,
                                   },
                                 }))
                               }
+                              disabled={activeRoomBuildingId === ""}
                             >
-                              <option value="">Select room...</option>
-                              {rooms.map((room: Room) => (
+                              <option value="">
+                                {activeRoomBuildingId === ""
+                                  ? "Select building first..."
+                                  : "Select room..."}
+                              </option>
+                              {roomOptionsForBuilding.map((room: Room) => (
                                 <option key={room.id} value={room.id}>
                                   {roomLabelById.get(room.id) ?? room.name}
                                 </option>
                               ))}
                             </select>
-                          )}
-
-                          {conflictStage !== "runtime" &&
-                            resolution?.action === "CHANGE_ROOM" &&
-                            roomResolutionMode === "CREATE_ROOM" && (
-                              <div className="grid gap-2 sm:grid-cols-2">
-                                <select
-                                  className="input"
-                                  value={resolution?.createRoomBuildingId ?? ""}
-                                  onChange={(e) =>
-                                    setConflictResolutions((prev) => ({
-                                      ...prev,
-                                      [conflict.id]: {
-                                        ...(prev[conflict.id] ?? { action: "CHANGE_ROOM" }),
-                                        createRoomBuildingId:
-                                          e.target.value === "" ? "" : Number(e.target.value),
-                                      },
-                                    }))
-                                  }
-                                >
-                                  <option value="">Select building...</option>
-                                  {buildings.map((building) => (
-                                    <option key={building.id} value={building.id}>
-                                      {building.name}
-                                    </option>
-                                  ))}
-                                </select>
-                                <input
-                                  className="input"
-                                  type="text"
-                                  value={resolution?.createRoomName ?? ""}
-                                  placeholder="New room name"
-                                  onChange={(e) =>
-                                    setConflictResolutions((prev) => ({
-                                      ...prev,
-                                      [conflict.id]: {
-                                        ...(prev[conflict.id] ?? { action: "CHANGE_ROOM" }),
-                                        createRoomName: e.target.value,
-                                      },
-                                    }))
-                                  }
-                                />
-                              </div>
-                            )}
+                          </div>
                         </div>
                       )}
                     </div>
