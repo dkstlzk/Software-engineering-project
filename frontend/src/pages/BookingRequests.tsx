@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   approveBookingRequest,
   approveEditRequest,
@@ -422,6 +422,7 @@ export function BookingRequestsPage({
   const { user } = useAuth();
   const { pushToast } = useToast();
   const location = useLocation();
+  const navigate = useNavigate();
   const currentRole = user?.role ?? null;
   const isAdmin = currentRole === "ADMIN";
   const isStaff = currentRole === "STAFF";
@@ -1363,10 +1364,6 @@ export function BookingRequestsPage({
   };
 
   const handleCheckAvailability = () => {
-    if (!onOpenAvailability) {
-      return;
-    }
-
     if (roomId === "") {
       setError("Room is required to check availability");
       return;
@@ -1385,12 +1382,19 @@ export function BookingRequestsPage({
     }
 
     const selectedRoom = rooms.find((room) => room.id === roomId);
-    onOpenAvailability({
+    const availabilityPrefill: AvailabilityPrefill = {
       startAt,
       endAt,
       buildingId: selectedRoom?.buildingId,
       focusRoomId: roomId,
-    });
+    };
+
+    if (onOpenAvailability) {
+      onOpenAvailability(availabilityPrefill);
+      return;
+    }
+
+    navigate("/availability", { state: { prefill: availabilityPrefill } });
   };
 
   const runAction = async (id: number, action: () => Promise<void>) => {

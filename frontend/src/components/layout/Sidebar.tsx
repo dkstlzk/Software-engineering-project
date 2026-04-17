@@ -85,7 +85,7 @@ export function Sidebar({ isMobile = false, onClose }: SidebarProps) {
             <div className="w-8 h-8 rounded-md bg-slate-700 text-white flex items-center justify-center font-semibold">
               RB
             </div>
-            <span className="font-semibold text-base tracking-tight hidden sm:inline">Rooms</span>
+            <span className="font-semibold text-base tracking-tight hidden sm:inline">URAS</span>
           </div>
           {isMobile && (
             <button
